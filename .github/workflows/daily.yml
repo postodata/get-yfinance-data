@@ -40,7 +40,9 @@ jobs:
             SNOW
             MO
             INTC
-          SHEET_NAME: "Portfolio Tracker"
+            BABA
+            TSMC
+          SHEET_NAME: "Stocks_Dividends_Core_OS"
           SNAPSHOT_TAB: "Snapshot"
           HISTORY_TAB: "History"
           GSERVICE_JSON: ${{ secrets.GSERVICE_JSON }}
