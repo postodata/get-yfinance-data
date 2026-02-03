@@ -1,7 +1,7 @@
 import os
 import re
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 import numpy as np
 import pandas as pd
@@ -47,6 +47,71 @@ def safe_div(a, b):
 
 def clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
+
+
+def compact_number(x):
+    """
+    10500000 -> '10.5M'
+    10500000000 -> '10.5B'
+    Keeps sign. Returns None for missing.
+    """
+    if x is None:
+        return None
+    try:
+        n = float(x)
+    except Exception:
+        return None
+
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+
+    if n >= 1e12:
+        return f"{sign}{n/1e12:.1f}T"
+    if n >= 1e9:
+        return f"{sign}{n/1e9:.1f}B"
+    if n >= 1e6:
+        return f"{sign}{n/1e6:.1f}M"
+    if n >= 1e3:
+        return f"{sign}{n/1e3:.1f}K"
+    return f"{sign}{n:.0f}"
+
+
+def unix_to_iso_date(x):
+    """
+    Converts Unix timestamp (seconds) or date-like to ISO 'YYYY-MM-DD'.
+    If already ISO-ish string, tries to parse.
+    Returns None if conversion fails.
+    """
+    if x in (None, "", 0):
+        return None
+
+    # If it's already a date/datetime
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return x.isoformat()
+    if isinstance(x, datetime):
+        return x.date().isoformat()
+
+    # If numeric unix seconds
+    try:
+        # Yahoo often uses seconds; sometimes float
+        if isinstance(x, (int, float, np.integer, np.floating)):
+            # Heuristic: if looks like ms, convert
+            if x > 1e12:
+                x = x / 1000.0
+            dt = datetime.utcfromtimestamp(float(x))
+            return dt.date().isoformat()
+    except Exception:
+        pass
+
+    # If string, try parse
+    try:
+        dt = pd.to_datetime(str(x), errors="coerce")
+        if pd.isna(dt):
+            return None
+        # dt can be Timestamp
+        return dt.date().isoformat()
+    except Exception:
+        return None
 
 
 def normalize_tickers(raw: str):
@@ -99,7 +164,6 @@ def annual_dividends_series(divs: pd.Series) -> pd.Series:
     """
     if divs is None or len(divs) == 0:
         return pd.Series(dtype=float)
-    # Ensure UTC-naive safe resample
     s = divs.copy()
     try:
         s.index = pd.to_datetime(s.index).tz_localize(None)
@@ -120,10 +184,8 @@ def dividend_cagr_n_years(annual: pd.Series, n_years: int):
     if annual is None or len(annual) < (n_years + 1):
         return None
 
-    # Use years as integers for exact matching
     years = [int(x.year) for x in annual.index]
     vals = list(annual.values)
-
     y_to_val = {y: float(v) for y, v in zip(years, vals) if v is not None and v > 0}
     if not y_to_val:
         return None
@@ -153,12 +215,9 @@ def count_div_cuts_10y(annual: pd.Series):
     if annual is None or len(annual) < 2:
         return None
 
-    # Keep last 11 years to count 10 transitions
     annual_sorted = annual.sort_index()
-    # Convert to years and filter
     years = [int(x.year) for x in annual_sorted.index]
     vals = list(annual_sorted.values)
-
     if not years:
         return None
 
@@ -188,7 +247,7 @@ def dividend_safety_score(row):
 
     payout_eps = row.get("payout_eps")
     payout_fcf = row.get("payout_fcf")
-    fcf_total = row.get("free_cashflow")
+    fcf_total = row.get("free_cashflow_raw") if row.get("free_cashflow_raw") is not None else row.get("free_cashflow")
     debt_eq = row.get("debt_to_equity")
     roe = row.get("roe")
     yld = row.get("dividend_yield")
@@ -196,14 +255,12 @@ def dividend_safety_score(row):
     net_debt_to_ebitda = row.get("net_debt_to_ebitda")
     interest_cov = row.get("interest_coverage")
 
-    # Dividend cuts are a big red flag
     if div_cuts_10y is not None:
         if div_cuts_10y >= 2:
             score -= 25
         elif div_cuts_10y == 1:
             score -= 15
 
-    # Payout (EPS-based)
     if payout_eps is not None:
         if payout_eps > 0.9:
             score -= 30
@@ -212,7 +269,6 @@ def dividend_safety_score(row):
         elif payout_eps > 0.6:
             score -= 8
 
-    # Payout (FCF-based) – more meaningful
     if payout_fcf is not None:
         if payout_fcf > 1.0:
             score -= 25
@@ -221,11 +277,9 @@ def dividend_safety_score(row):
         elif payout_fcf > 0.65:
             score -= 6
 
-    # Free cash flow
     if fcf_total is not None and fcf_total <= 0:
         score -= 25
 
-    # Leverage
     if net_debt_to_ebitda is not None:
         if net_debt_to_ebitda > 4.0:
             score -= 18
@@ -238,21 +292,18 @@ def dividend_safety_score(row):
         elif debt_eq > 120:
             score -= 8
 
-    # Interest coverage (if present)
     if interest_cov is not None:
         if interest_cov < 3:
             score -= 12
         elif interest_cov < 5:
             score -= 6
 
-    # ROE quality (light touch)
     if roe is not None:
         if roe < 0.06:
             score -= 8
         elif roe > 0.20:
             score += 4
 
-    # Yield extremes (trap potential)
     if yld is not None and yld > 0.07:
         score -= 10
 
@@ -261,7 +312,7 @@ def dividend_safety_score(row):
 
 def dividend_growth_score(row):
     """
-    0-100 growth score for dividend growth profile.
+    0-100 dividend growth score.
     Uses CAGR5/CAGR10 + quality.
     """
     score = 50.0
@@ -272,8 +323,6 @@ def dividend_growth_score(row):
     payout_fcf = row.get("payout_fcf")
     debt_eq = row.get("debt_to_equity")
 
-    # Dividend CAGR contribution
-    # prefer 10Y if available, else 5Y
     c = cagr10 if cagr10 is not None else cagr5
     if c is not None:
         if c >= 0.10:
@@ -287,21 +336,18 @@ def dividend_growth_score(row):
         else:
             score -= 8
 
-    # ROE
     if roe is not None:
         if roe > 0.20:
             score += 10
         elif roe < 0.08:
             score -= 8
 
-    # Payout discipline supports future growth
     if payout_fcf is not None:
         if payout_fcf < 0.5:
             score += 8
         elif payout_fcf > 0.9:
             score -= 10
 
-    # Too much leverage limits growth
     if debt_eq is not None and debt_eq > 150:
         score -= 8
 
@@ -309,13 +355,10 @@ def dividend_growth_score(row):
 
 
 def yield_trap_flag(row):
-    """
-    High yield + weak coverage = trap candidate.
-    """
     yld = row.get("dividend_yield")
     payout_fcf = row.get("payout_fcf")
     payout_eps = row.get("payout_eps")
-    fcf_total = row.get("free_cashflow")
+    fcf_total = row.get("free_cashflow_raw") if row.get("free_cashflow_raw") is not None else row.get("free_cashflow")
     div_cuts_10y = row.get("div_cuts_10y")
 
     if yld is None:
@@ -332,13 +375,6 @@ def yield_trap_flag(row):
 
 
 def valuation_score_0_5(row):
-    """
-    Deterministic 0–5 valuation score using robust available inputs:
-    - P/E
-    - EV/EBITDA
-    - Price vs MA200
-    - Yield vs 5Y avg yield
-    """
     score = 2.5
 
     pe = row.get("trailing_pe")
@@ -347,7 +383,6 @@ def valuation_score_0_5(row):
     yld = row.get("dividend_yield")
     yld5 = row.get("yield_avg_5y")
 
-    # P/E
     if pe is not None:
         if pe <= 15:
             score += 0.8
@@ -358,7 +393,6 @@ def valuation_score_0_5(row):
         elif pe >= 28:
             score -= 0.4
 
-    # EV/EBITDA
     if ev_ebitda is not None:
         if ev_ebitda <= 10:
             score += 0.8
@@ -369,14 +403,12 @@ def valuation_score_0_5(row):
         elif ev_ebitda >= 18:
             score -= 0.4
 
-    # Price vs MA200 (below MA200 = mild bonus)
     if price_vs_ma200 is not None:
         if price_vs_ma200 <= -0.10:
             score += 0.4
         elif price_vs_ma200 >= 0.15:
             score -= 0.4
 
-    # Yield vs 5Y avg yield
     if yld is not None and yld5 is not None:
         if yld >= yld5 * 1.15:
             score += 0.4
@@ -411,26 +443,14 @@ def safety_verdict(safety_0_100):
 
 
 def final_recommendation(row):
-    """
-    Final recommendation uses:
-      - Safety (must PASS to buy)
-      - Valuation (prefer FAIR/UNDERVALUED)
-      - Dividend growth (CAGR5/CAGR10)
-    """
     safety = row.get("dividend_safety_score")
     val = row.get("valuation_score_0_5")
     trap = row.get("yield_trap_flag")
     c5 = row.get("div_cagr_5y")
     c10 = row.get("div_cagr_10y")
 
-    # Growth signal
-    growth_best = None
-    if c10 is not None:
-        growth_best = c10
-    elif c5 is not None:
-        growth_best = c5
+    growth_best = c10 if c10 is not None else c5
 
-    # Hard stops
     if trap:
         return "AVOID", "Yield trap: high yield + weak coverage/cuts"
 
@@ -440,14 +460,11 @@ def final_recommendation(row):
     if safety < 70:
         return "WATCH", "Safety below PASS threshold"
 
-    # Growth-aware buying
-    # Strong buy: high safety, acceptable valuation, decent dividend growth
     if safety >= 80 and val >= 3.5:
         if growth_best is None or growth_best >= 0.03:
             return "STRONG BUY", "High safety + attractive valuation"
         return "BUY", "High safety + attractive valuation, but slow dividend growth"
 
-    # Buy: pass safety and fair valuation
     if val >= 3.0:
         if growth_best is None:
             return "BUY", "Pass safety + fair/attractive valuation"
@@ -457,7 +474,6 @@ def final_recommendation(row):
             return "BUY", "Pass safety + fair valuation + moderate dividend growth"
         return "HOLD", "Pass safety + fair valuation, but low dividend growth"
 
-    # Rich valuation
     if growth_best is not None and growth_best >= 0.07 and safety >= 80:
         return "HOLD", "Great dividend grower, but valuation is rich"
     return "HOLD", "Pass safety but valuation is rich"
@@ -476,7 +492,6 @@ def get_snapshot(tickers):
 
     tickers_str = " ".join(tickers)
 
-    # Latest close (robust)
     px_short = yf.download(
         tickers=tickers_str,
         period="10d",
@@ -487,7 +502,6 @@ def get_snapshot(tickers):
         progress=False,
     )
 
-    # For MA200 and 5Y yield
     px_5y = yf.download(
         tickers=tickers_str,
         period="5y",
@@ -501,13 +515,11 @@ def get_snapshot(tickers):
     for t in tickers:
         tk = yf.Ticker(t)
 
-        # Info (may be flaky)
         try:
             info = tk.info or {}
         except Exception:
             info = {}
 
-        # Latest close from batch
         last_close = None
         try:
             if len(tickers) == 1:
@@ -517,34 +529,33 @@ def get_snapshot(tickers):
         except Exception:
             last_close = as_float(info.get("regularMarketPrice"))
 
-        # Core fields
         shares = to_num(info.get("sharesOutstanding"))
         trailing_eps = to_num(info.get("trailingEps"))
         ebitda = to_num(info.get("ebitda"))
         total_debt = to_num(info.get("totalDebt"))
         total_cash = to_num(info.get("totalCash"))
         fcf_total = to_num(info.get("freeCashflow"))
+        market_cap = to_num(info.get("marketCap"))
 
         dps_ttm = to_num(info.get("trailingAnnualDividendRate"))
         yld = to_num(info.get("dividendYield"))
         payout_eps = to_num(info.get("payoutRatio"))
 
-        # FCF/share
+        # Ensure ex-dividend is an ISO date
+        ex_dividend_date = unix_to_iso_date(info.get("exDividendDate"))
+
         fcf_per_share = safe_div(fcf_total, shares)
 
-        # Payout (FCF): (DPS_TTM * shares) / FCF_total
         dividends_ttm_total = None
         if dps_ttm is not None and shares is not None:
             dividends_ttm_total = dps_ttm * shares
         payout_fcf = safe_div(dividends_ttm_total, fcf_total)
 
-        # Net Debt / EBITDA
         net_debt = None
         if total_debt is not None and total_cash is not None:
             net_debt = total_debt - total_cash
         net_debt_to_ebitda = safe_div(net_debt, ebitda)
 
-        # Interest coverage (EBIT / |Interest Expense|) if possible
         interest_coverage = None
         try:
             fin = tk.financials
@@ -562,7 +573,6 @@ def get_snapshot(tickers):
         except Exception:
             pass
 
-        # Dividends history: cuts + CAGR
         div_cuts_10y = None
         div_cagr_5y = None
         div_cagr_10y = None
@@ -576,7 +586,6 @@ def get_snapshot(tickers):
         except Exception:
             pass
 
-        # MA200 + price vs MA200
         ma200 = None
         price_vs_ma200 = None
         try:
@@ -584,7 +593,6 @@ def get_snapshot(tickers):
                 close_series = px_5y["Close"].dropna()
             else:
                 close_series = px_5y[t]["Close"].dropna()
-
             if len(close_series) >= 200:
                 ma200 = float(close_series.tail(200).mean())
                 if last_close is not None and ma200 not in (None, 0, 0.0):
@@ -592,10 +600,8 @@ def get_snapshot(tickers):
         except Exception:
             pass
 
-        # Yield Avg 5Y: mean(annual_div / avg_annual_price) over last ~5 years
         yield_avg_5y = None
         try:
-            # dividend history already loaded above; use it if available
             divs = tk.dividends
             if divs is not None and len(divs) > 0:
                 annual_div = annual_dividends_series(divs)
@@ -603,12 +609,9 @@ def get_snapshot(tickers):
                     close = px_5y["Close"].dropna()
                 else:
                     close = px_5y[t]["Close"].dropna()
-
                 annual_price = close.resample("Y").mean()
                 joined = pd.concat([annual_div, annual_price], axis=1).dropna()
-
                 if joined.shape[0] > 0:
-                    # take last 5 years in joined (calendar years)
                     joined = joined.tail(5)
                     yr_yields = joined.iloc[:, 0] / joined.iloc[:, 1]
                     if len(yr_yields) > 0:
@@ -628,9 +631,9 @@ def get_snapshot(tickers):
             "dividend_yield_pct": (yld * 100.0) if yld is not None else None,
             "div_per_share_ttm": dps_ttm,
             "dividend_rate_fwd": to_num(info.get("dividendRate")),
-            "ex_dividend_date": info.get("exDividendDate"),
+            "ex_dividend_date": ex_dividend_date,  # ISO date string
 
-            # Safety KPIs (template-like)
+            # Safety
             "fcf_per_share_ttm": fcf_per_share,
             "payout_fcf": payout_fcf,
             "eps_ttm": trailing_eps,
@@ -641,7 +644,7 @@ def get_snapshot(tickers):
             "div_cagr_5y": div_cagr_5y,
             "div_cagr_10y": div_cagr_10y,
 
-            # Valuation KPIs (template-like)
+            # Valuation
             "trailing_pe": to_num(info.get("trailingPE")),
             "forward_pe": to_num(info.get("forwardPE")),
             "price_to_book": to_num(info.get("priceToBook")),
@@ -650,11 +653,13 @@ def get_snapshot(tickers):
             "ma200": ma200,
             "price_vs_ma200": price_vs_ma200,
 
-            # Other useful fundamentals
-            "market_cap": to_num(info.get("marketCap")),
+            # Big-number fundamentals (RAW)
+            "market_cap": market_cap,
             "free_cashflow": fcf_total,
             "total_debt": total_debt,
             "total_cash": total_cash,
+
+            # Other useful fundamentals
             "debt_to_equity": to_num(info.get("debtToEquity")),
             "roe": to_num(info.get("returnOnEquity")),
             "profit_margin": to_num(info.get("profitMargins")),
@@ -674,32 +679,46 @@ def get_snapshot(tickers):
     df["valuation_score_0_5"] = df.apply(lambda r: valuation_score_0_5(r.to_dict()), axis=1)
     df["valuation_verdict"] = df["valuation_score_0_5"].apply(valuation_verdict)
 
-    # Final recommendation (Safety + Valuation + Dividend Growth)
     final = df.apply(lambda r: final_recommendation(r.to_dict()), axis=1, result_type="expand")
     df["final_recommendation"] = final[0]
     df["final_reason"] = final[1]
 
-    # Extra human-readable CAGR % columns
+    # CAGR % columns
     df["div_cagr_5y_pct"] = df["div_cagr_5y"].apply(lambda x: (x * 100.0) if x is not None else None)
     df["div_cagr_10y_pct"] = df["div_cagr_10y"].apply(lambda x: (x * 100.0) if x is not None else None)
 
-    # Recommended column order (keeps Snapshot clean)
+    # Compact formatting for large money-like fields
+    money_like_cols = ["market_cap", "free_cashflow", "total_debt", "total_cash"]
+    for c in money_like_cols:
+        if c in df.columns:
+            df[c + "_raw"] = df[c]
+            df[c + "_fmt"] = df[c].apply(compact_number)
+
+    # Column order (prefer *_fmt for display)
     preferred_cols = [
         "as_of_date", "ticker", "name", "price", "currency",
         "final_recommendation", "final_reason",
         "dividend_safety_score", "safety_score_0_5", "safety_verdict",
         "valuation_score_0_5", "valuation_verdict",
         "dividend_growth_score", "yield_trap_flag",
+
         "dividend_yield_pct", "dividend_yield",
         "div_per_share_ttm", "dividend_rate_fwd", "ex_dividend_date",
         "div_cagr_5y_pct", "div_cagr_10y_pct", "div_cagr_5y", "div_cagr_10y",
+
         "fcf_per_share_ttm", "payout_fcf", "eps_ttm", "payout_eps",
         "net_debt_to_ebitda", "interest_coverage", "div_cuts_10y",
+
         "trailing_pe", "forward_pe", "ev_ebitda", "price_to_book",
         "yield_avg_5y", "ma200", "price_vs_ma200",
-        "market_cap", "free_cashflow", "total_debt", "total_cash", "debt_to_equity",
-        "roe", "profit_margin", "beta",
+
+        "market_cap_fmt", "free_cashflow_fmt", "total_debt_fmt", "total_cash_fmt",
+        "debt_to_equity", "roe", "profit_margin", "beta",
+
+        # keep raw versions (useful for debugging/analytics)
+        "market_cap_raw", "free_cashflow_raw", "total_debt_raw", "total_cash_raw",
     ]
+
     cols = [c for c in preferred_cols if c in df.columns] + [c for c in df.columns if c not in preferred_cols]
     df = df[cols]
 
@@ -726,13 +745,12 @@ def upsert_sheet(ws, df: pd.DataFrame):
 
 def ensure_same_schema_or_reset(ws, desired_header):
     """
-    If History header differs from Snapshot header, reset History completely
+    If History header differs from Snapshot header, reset History header
     so History stays a true mirror schema of Snapshot over time.
     """
     existing = ws.get_all_values()
     if not existing:
         return
-
     header = existing[0]
     if header != desired_header:
         ws.clear()
@@ -748,10 +766,8 @@ def append_history(ws, df, key_cols=("as_of_date", "ticker")):
     header = existing[0]
     existing_rows = existing[1:]
 
-    # Build key set
     col_idx = {name: i for i, name in enumerate(header)}
     if not all(c in col_idx for c in key_cols):
-        # reset if weird schema
         ws.clear()
         ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
         return
@@ -787,24 +803,18 @@ def main():
     gc = gsheets_client()
     sh = gc.open(sheet_name)
 
-    # Ensure worksheets exist
     try:
         ws_snap = sh.worksheet(snapshot_tab)
     except Exception:
-        ws_snap = sh.add_worksheet(title=snapshot_tab, rows=2000, cols=80)
+        ws_snap = sh.add_worksheet(title=snapshot_tab, rows=2000, cols=120)
 
     try:
         ws_hist = sh.worksheet(history_tab)
     except Exception:
-        ws_hist = sh.add_worksheet(title=history_tab, rows=20000, cols=80)
+        ws_hist = sh.add_worksheet(title=history_tab, rows=20000, cols=120)
 
-    # Write Snapshot (overwrite)
     upsert_sheet(ws_snap, df)
-
-    # Keep History schema identical to Snapshot schema; reset if schema changed
     ensure_same_schema_or_reset(ws_hist, df.columns.tolist())
-
-    # Append History (idempotent)
     append_history(ws_hist, df)
 
     print("OK: Snapshot overwritten; History appended; schema kept in sync.")
