@@ -2,7 +2,7 @@ name: Update Dividend KPIs Daily
 
 on:
   schedule:
-    - cron: "15 18 * * *"   # 18:15 UTC = 20:15 Bucharest (winter)
+    - cron: "15 18 * * *"
   workflow_dispatch:
 
 jobs:
@@ -10,14 +10,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: python main.py
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run updater
+        run: python main.py
         env:
-          TICKERS: "AAPL,MSFT,PG,NVDA,KO,PEP,JNJ,XOM"
-          SHEET_NAME: "Stocks_Dividends_Core_OS"
+          TICKERS: |
+            NYSE:UL
+            NYSE:PG
+            NYSE:XOM
+            NYSE:ABBV
+            NYSE:V
+            NYSE:PM
+            NASDAQ:PEP
+            NYSE:LMT
+            NYSE:MMM
+            NYSE:JNJ
+            NASDAQ:MSFT
+            NYSE:GRMN
+            NYSE:CVX
+            UNH
+            SAP
+            SNOW
+            MO
+            INTC
+          SHEET_NAME: "Portfolio Tracker"
           SNAPSHOT_TAB: "Snapshot"
           HISTORY_TAB: "History"
           GSERVICE_JSON: ${{ secrets.GSERVICE_JSON }}
