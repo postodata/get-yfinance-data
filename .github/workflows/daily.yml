@@ -17,7 +17,7 @@ jobs:
       - run: python main.py
         env:
           TICKERS: "AAPL,MSFT,PG,NVDA,KO,PEP,JNJ,XOM"
-          SHEET_NAME: "Portfolio Tracker"
+          SHEET_NAME: "Stocks_Dividends_Core_OS"
           SNAPSHOT_TAB: "Snapshot"
           HISTORY_TAB: "History"
           GSERVICE_JSON: ${{ secrets.GSERVICE_JSON }}
