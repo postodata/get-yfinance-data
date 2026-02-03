@@ -41,7 +41,19 @@ jobs:
             MO
             INTC
             BABA
-            TSMC
+            TSM
+            LHX
+            NVO
+            MRK
+            NEE
+            TXN
+            ZTS
+            AVGO
+            ARE
+            AMT
+            BLK
+            BMY
+            BTI
           SHEET_NAME: "Stocks_Dividends_Core_OS"
           SNAPSHOT_TAB: "Snapshot"
           HISTORY_TAB: "History"
