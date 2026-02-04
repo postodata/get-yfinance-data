@@ -112,10 +112,8 @@ def parse_tickers(raw: str):
     Accepts:
       - "NYSE:UL, NASDAQ:MSFT" (commas or newlines)
       - "PG, MSFT"
-    Returns a list of dicts:
+    Returns list of dicts:
       {"yf": "UL", "google": "NYSE:UL"}
-    If no exchange prefix, google ticker becomes the same as yf ticker.
-    Deduplicates by yf ticker, keeps first occurrence.
     """
     if not raw:
         return []
@@ -162,13 +160,11 @@ def round_numeric_columns(df: pd.DataFrame):
     """
     df2 = df.copy()
     num_cols = df2.select_dtypes(include=[np.number]).columns.tolist()
-
     for c in num_cols:
         if c == "price_vs_ma200":
             df2[c] = df2[c].round(4)
         else:
             df2[c] = df2[c].round(2)
-
     return df2
 
 
@@ -478,22 +474,10 @@ def final_recommendation(row):
 # KPI Dictionary (separate sheet)
 # ----------------------------
 def build_kpi_dictionary_rows():
-    # Minimal but useful; extend as you like.
     rows = [
-        ("dividend_safety_score", "Dividend Safety Score (0-100)", "Heuristic from payout ratios, FCF, leverage, cuts."),
-        ("valuation_score_0_5", "Valuation Score (0-5)", "Heuristic from P/E, EV/EBITDA, MA200, yield vs avg."),
-        ("dividend_growth_score", "Dividend Growth Score (0-100)", "Uses dividend CAGR + ROE + payout + leverage."),
-        ("payout_fcf", "Payout ratio (FCF)", "(TTM dividends total) / free cash flow."),
-        ("payout_eps", "Payout ratio (EPS)", "From yfinance payoutRatio."),
-        ("net_debt_to_ebitda", "Net Debt / EBITDA", "(Debt - Cash) / EBITDA."),
-        ("percentage_vs_ath_pct", "% vs ATH", "(price/ATH - 1)*100."),
-        ("sparkline_1y", "1Y sparkline", 'Formula: SPARKLINE(GOOGLEFINANCE(google_ticker,"price",TODAY()-365,TODAY())).'),
-        ("buy_the_dip_20_ath", "Buy the dip (<= -20% ATH)", 'Formula: IF(price <= 0.8*ATH,"BUY NOW","WAIT").'),
-        ("market_cap", "Market cap (formatted)", "From yfinance marketCap formatted as K/M/B/T."),
-        ("free_cashflow", "Free cash flow (formatted)", "From yfinance freeCashflow formatted as K/M/B/T."),
-        ("total_debt", "Total debt (formatted)", "From yfinance totalDebt formatted as K/M/B/T."),
-        ("total_cash", "Total cash (formatted)", "From yfinance totalCash formatted as K/M/B/T."),
-        ("ath_price", "ATH price (formatted)", "Max adjusted close from yfinance period='max'."),
+        ("ath_price", "All-time-high price (formatted)", "Max adjusted close from yfinance period='max', formatted as K/M/B/T."),
+        ("ath_date", "Date when ATH was reached", "First date where adjusted close equals the max (YYYY-MM-DD)."),
+        ("ath_days_since", "Days since ATH", "Today(UTC) - ath_date, in days."),
     ]
     out = [["kpi", "meaning", "how_calculated_or_source"]]
     out.extend([list(r) for r in rows])
@@ -505,7 +489,8 @@ def build_kpi_dictionary_rows():
 # ----------------------------
 def get_snapshot(ticker_items):
     rows = []
-    as_of_date = datetime.now(timezone.utc).date().isoformat()
+    today_utc = datetime.now(timezone.utc).date()
+    as_of_date = today_utc.isoformat()
 
     yf_tickers = [t["yf"] for t in ticker_items if t.get("yf")]
     if not yf_tickers:
@@ -655,21 +640,34 @@ def get_snapshot(ticker_items):
         except Exception:
             pass
 
-        # ATH
+        # ATH price + ATH date (first time max was hit)
         ath_price_num = None
+        ath_date = None
+        ath_days_since = None
         try:
             if len(yf_tickers) == 1:
                 close_max = px_max["Close"].dropna()
             else:
                 close_max = px_max[t]["Close"].dropna()
+
             if len(close_max) > 0:
                 ath_price_num = float(close_max.max())
+
+                idx = close_max[close_max == close_max.max()].index
+                if len(idx) > 0:
+                    dt = pd.to_datetime(idx[0]).to_pydatetime().date()
+                    ath_date = dt.isoformat()
+                    ath_days_since = (today_utc - dt).days
         except Exception:
             pass
 
         percentage_vs_ath_pct = None
         if last_close is not None and ath_price_num not in (None, 0, 0.0):
             percentage_vs_ath_pct = (last_close / ath_price_num - 1.0) * 100.0
+
+        buy_the_dip_20_ath = None
+        if last_close is not None and ath_price_num not in (None, 0, 0.0):
+            buy_the_dip_20_ath = "BUY NOW" if last_close <= 0.8 * ath_price_num else "WAIT"
 
         google_ticker = yf_to_google.get(t, t)
 
@@ -681,13 +679,15 @@ def get_snapshot(ticker_items):
             "price": last_close,
             "currency": info.get("currency"),
 
-            # Formulas
+            # Formula
             "sparkline_1y": "",
-            "buy_the_dip_20_ath": "",
 
             # ATH / Dip
-            "ath_price_num": ath_price_num,
+            "ath_price": compact_number(ath_price_num),
+            "ath_date": ath_date,
+            "ath_days_since": ath_days_since,
             "percentage_vs_ath_pct": percentage_vs_ath_pct,
+            "buy_the_dip_20_ath": buy_the_dip_20_ath,
 
             # Dividend basics
             "dividend_yield": yld,
@@ -716,11 +716,14 @@ def get_snapshot(ticker_items):
             "ma200": ma200,
             "price_vs_ma200": price_vs_ma200,
 
-            # Big-number fundamentals (numeric for scoring, will be formatted for display)
-            "market_cap_num": market_cap_num,
-            "free_cashflow_num": fcf_total_num,
-            "total_debt_num": total_debt_num,
-            "total_cash_num": total_cash_num,
+            # Big-number fundamentals (formatted-only output)
+            "market_cap": compact_number(market_cap_num),
+            "free_cashflow": compact_number(fcf_total_num),
+            "total_debt": compact_number(total_debt_num),
+            "total_cash": compact_number(total_cash_num),
+
+            # Internal numeric for scoring only (will NOT be output)
+            "_free_cashflow_num": fcf_total_num,
 
             # Other
             "debt_to_equity": to_num(info.get("debtToEquity")),
@@ -731,15 +734,20 @@ def get_snapshot(ticker_items):
 
     df = pd.DataFrame(rows)
 
-    # Scores
-    df["dividend_safety_score"] = df.apply(lambda r: dividend_safety_score(r.to_dict()), axis=1)
-    df["dividend_growth_score"] = df.apply(lambda r: dividend_growth_score(r.to_dict()), axis=1)
-    df["yield_trap_flag"] = df.apply(lambda r: yield_trap_flag(r.to_dict()), axis=1)
+    # Scores (use internal numeric FCF)
+    def _row_for_scores(r):
+        d = r.to_dict()
+        d["free_cashflow_num"] = d.get("_free_cashflow_num")
+        return d
+
+    df["dividend_safety_score"] = df.apply(lambda r: dividend_safety_score(_row_for_scores(r)), axis=1)
+    df["dividend_growth_score"] = df.apply(lambda r: dividend_growth_score(_row_for_scores(r)), axis=1)
+    df["yield_trap_flag"] = df.apply(lambda r: yield_trap_flag(_row_for_scores(r)), axis=1)
 
     df["safety_score_0_5"] = df["dividend_safety_score"].apply(map_0_100_to_0_5)
     df["safety_verdict"] = df["dividend_safety_score"].apply(safety_verdict)
 
-    df["valuation_score_0_5"] = df.apply(lambda r: valuation_score_0_5(r.to_dict()), axis=1)
+    df["valuation_score_0_5"] = df.apply(lambda r: valuation_score_0_5(_row_for_scores(r)), axis=1)
     df["valuation_verdict"] = df["valuation_score_0_5"].apply(valuation_verdict)
 
     final = df.apply(lambda r: final_recommendation(r.to_dict()), axis=1, result_type="expand")
@@ -750,29 +758,20 @@ def get_snapshot(ticker_items):
     df["div_cagr_5y_pct"] = df["div_cagr_5y"].apply(lambda x: (x * 100.0) if x is not None else None)
     df["div_cagr_10y_pct"] = df["div_cagr_10y"].apply(lambda x: (x * 100.0) if x is not None else None)
 
-    # Rounding (on numerics)
+    # Rounding (numeric display columns)
     df = round_numeric_columns(df)
 
-    # ---- Create formatted-only display columns (remove redundant raw columns later) ----
-    df["market_cap"] = df["market_cap_num"].apply(compact_number)
-    df["free_cashflow"] = df["free_cashflow_num"].apply(compact_number)
-    df["total_debt"] = df["total_debt_num"].apply(compact_number)
-    df["total_cash"] = df["total_cash_num"].apply(compact_number)
-    df["ath_price"] = df["ath_price_num"].apply(compact_number)
-
-    # ---- Google Sheets formulas (robust to column order) ----
+    # SPARKLINE formula (robust to column order)
     df["sparkline_1y"] = (
         '=SPARKLINE(GOOGLEFINANCE('
         'INDEX($A:$ZZ,ROW(),MATCH("google_ticker",$1:$1,0))'
         ',"price",TODAY()-365,TODAY()))'
     )
-    df["buy_the_dip_20_ath"] = (
-        '=IF(0.8*INDEX($A:$ZZ,ROW(),MATCH("ath_price_num",$1:$1,0))'
-        '>=INDEX($A:$ZZ,ROW(),MATCH("price",$1:$1,0))'
-        ',"BUY NOW","WAIT")'
-    )
 
-    # Final column set (keep only formatted big numbers; keep ath_price_num for formulas & gradients)
+    # Remove internal-only columns
+    df = df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore")
+
+    # Final column set (no *_num columns)
     preferred_cols = [
         "as_of_date",
         "ticker",
@@ -782,6 +781,8 @@ def get_snapshot(ticker_items):
         "currency",
         "sparkline_1y",
         "ath_price",
+        "ath_date",
+        "ath_days_since",
         "percentage_vs_ath_pct",
         "buy_the_dip_20_ath",
         "final_recommendation",
@@ -829,16 +830,8 @@ def get_snapshot(ticker_items):
         "roe",
         "profit_margin",
         "beta",
-
-        # Hidden/helper numeric columns for formulas/conditional formatting (kept but can be hidden in Sheets UI)
-        "ath_price_num",
-        "market_cap_num",
-        "free_cashflow_num",
-        "total_debt_num",
-        "total_cash_num",
     ]
-
-    cols = [c for c in preferred_cols if c in df.columns]
+    cols = [c for c in preferred_cols if c in df.columns] + [c for c in df.columns if c not in preferred_cols]
     df = df[cols]
 
     return df
@@ -848,9 +841,6 @@ def get_snapshot(ticker_items):
 # Google Sheets formatting helpers
 # ----------------------------
 def freeze_panes(ws, rows=1, cols=2):
-    """
-    Freeze first row and first N columns.
-    """
     try:
         ws.freeze(rows=rows, cols=cols)
     except Exception:
@@ -878,13 +868,7 @@ def col_index(header, col_name):
         return None
 
 
-def add_gradient_conditional_formats(sh, ws, header, n_rows):
-    """
-    Gradient rules:
-      - green for good
-      - red for bad
-    Uses ColorScale rules.
-    """
+def add_gradient_conditional_formats_and_bold(sh, ws, header, n_rows):
     sheet_id = ws.id
 
     def grid_range(col_name):
@@ -899,8 +883,21 @@ def add_gradient_conditional_formats(sh, ws, header, n_rows):
             "endColumnIndex": c + 1,
         }
 
+    def full_row_range():
+        return {
+            "sheetId": sheet_id,
+            "startRowIndex": 1,
+            "endRowIndex": max(2, n_rows + 1),
+            "startColumnIndex": 0,
+            "endColumnIndex": max(1, len(header)),
+        }
+
     def rgb(r, g, b):
         return {"red": r, "green": g, "blue": b}
+
+    red = rgb(0.96, 0.80, 0.80)
+    yellow = rgb(1.00, 0.95, 0.80)
+    green = rgb(0.80, 0.94, 0.80)
 
     requests = []
 
@@ -922,24 +919,40 @@ def add_gradient_conditional_formats(sh, ws, header, n_rows):
             }
         })
 
-    # Colors
-    red = rgb(0.96, 0.80, 0.80)
-    yellow = rgb(1.00, 0.95, 0.80)
-    green = rgb(0.80, 0.94, 0.80)
-
-    # "Higher is better"
+    # Higher is better
     add_scale("dividend_safety_score", 40, 70, 95, red, yellow, green)
     add_scale("valuation_score_0_5", 1.5, 3.0, 4.5, red, yellow, green)
     add_scale("dividend_growth_score", 20, 55, 85, red, yellow, green)
 
-    # "Lower is better" => invert min/max (green at low)
+    # Lower is better
     add_scale("payout_fcf", 0.2, 0.65, 1.2, green, yellow, red)
     add_scale("payout_eps", 0.2, 0.6, 1.0, green, yellow, red)
     add_scale("net_debt_to_ebitda", 0.5, 2.0, 5.0, green, yellow, red)
     add_scale("div_cuts_10y", 0, 1, 3, green, yellow, red)
 
-    # % vs ATH: more negative is better dip (green at -40, yellow at -20, red at 0)
+    # % vs ATH: more negative is better dip
     add_scale("percentage_vs_ath_pct", -40, -20, 0, green, yellow, red)
+
+    # Bold entire rows where final_recommendation == STRONG BUY
+    rec_col = col_index(header, "final_recommendation")
+    if rec_col is not None:
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [full_row_range()],
+                    "booleanRule": {
+                        "condition": {
+                            "type": "CUSTOM_FORMULA",
+                            "values": [{"userEnteredValue": f'=$${chr(65+rec_col)}2="STRONG BUY"'}]
+                        },
+                        "format": {"textFormat": {"bold": True}}
+                    }
+                },
+                "index": 0
+            }
+        })
+    # Note: above A1 col letter works only up to Z; for wider sheets we'd need R1C1.
+    # Our Snapshot width here is under 26 columns for the core set; if you expand beyond Z, switch to R1C1.
 
     if requests:
         sh.batch_update({"requests": requests})
@@ -1036,7 +1049,6 @@ def main():
     gc = gsheets_client()
     sh = gc.open_by_key(sheet_id) if sheet_id else gc.open(sheet_name)
 
-    # Ensure worksheets exist
     try:
         ws_snap = sh.worksheet(snapshot_tab)
     except Exception:
@@ -1051,9 +1063,8 @@ def main():
     upsert_sheet_user_entered(ws_snap, df)
     freeze_panes(ws_snap, rows=1, cols=2)
 
-    # Gradient conditional formatting on Snapshot
     header = df.columns.tolist()
-    add_gradient_conditional_formats(sh, ws_snap, header, n_rows=len(df))
+    add_gradient_conditional_formats_and_bold(sh, ws_snap, header, n_rows=len(df))
 
     # History schema sync + append
     ensure_same_schema_or_reset(ws_hist, header)
@@ -1063,7 +1074,7 @@ def main():
     # KPI dictionary sheet
     upsert_kpi_dictionary(sh, tab_name=dictionary_tab)
 
-    print("OK: Snapshot + History updated; freezes applied; gradient conditional formatting applied; KPI_Dictionary updated.")
+    print("OK: Snapshot + History updated; freezes applied; gradients applied; STRONG BUY rows bolded; KPI_Dictionary updated.")
 
 
 if __name__ == "__main__":
