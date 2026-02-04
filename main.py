@@ -51,8 +51,8 @@ def clamp(x, lo=0.0, hi=100.0):
 
 def compact_number(x):
     """
-    10500000 -> '10.5M'
-    10500000000 -> '10.5B'
+    10500000 -> '10.50M'
+    10500000000 -> '10.50B'
     Keeps sign. Returns None for missing.
     """
     if x is None:
@@ -66,14 +66,14 @@ def compact_number(x):
     n = abs(n)
 
     if n >= 1e12:
-        return f"{sign}{n/1e12:.1f}T"
+        return f"{sign}{n/1e12:.2f}T"
     if n >= 1e9:
-        return f"{sign}{n/1e9:.1f}B"
+        return f"{sign}{n/1e9:.2f}B"
     if n >= 1e6:
-        return f"{sign}{n/1e6:.1f}M"
+        return f"{sign}{n/1e6:.2f}M"
     if n >= 1e3:
-        return f"{sign}{n/1e3:.1f}K"
-    return f"{sign}{n:.0f}"
+        return f"{sign}{n/1e3:.2f}K"
+    return f"{sign}{n:.2f}".rstrip("0").rstrip(".")
 
 
 def unix_to_iso_date(x):
@@ -84,13 +84,11 @@ def unix_to_iso_date(x):
     if x in (None, "", 0):
         return None
 
-    # If it's already a date/datetime
     if isinstance(x, date) and not isinstance(x, datetime):
         return x.isoformat()
     if isinstance(x, datetime):
         return x.date().isoformat()
 
-    # If numeric unix seconds
     try:
         if isinstance(x, (int, float, np.integer, np.floating)):
             if x > 1e12:  # ms
@@ -100,7 +98,6 @@ def unix_to_iso_date(x):
     except Exception:
         pass
 
-    # If string, try parse
     try:
         dt = pd.to_datetime(str(x), errors="coerce")
         if pd.isna(dt):
@@ -118,7 +115,7 @@ def parse_tickers(raw: str):
     Returns a list of dicts:
       {"yf": "UL", "google": "NYSE:UL"}
     If no exchange prefix, google ticker becomes the same as yf ticker.
-    Deduplicates by yf ticker, keeps first occurrence (and its exchange prefix, if any).
+    Deduplicates by yf ticker, keeps first occurrence.
     """
     if not raw:
         return []
@@ -137,6 +134,7 @@ def parse_tickers(raw: str):
 
         if ":" in s:
             yf_ticker = s.split(":", 1)[1].strip()
+
         yf_ticker = yf_ticker.upper()
         yf_ticker = re.sub(r"[^A-Z0-9\.\-\^=]", "", yf_ticker)
 
@@ -144,10 +142,7 @@ def parse_tickers(raw: str):
             continue
 
         seen.add(yf_ticker)
-
-        # For GOOGLEFINANCE, it's safer to keep exchange prefix if provided
         google_ticker = google if ":" in google else yf_ticker
-
         out.append({"yf": yf_ticker, "google": google_ticker})
 
     return out
@@ -159,23 +154,28 @@ def map_0_100_to_0_5(score):
     return round((score / 100.0) * 5.0, 1)
 
 
-def pct_str(x):
-    if x is None:
-        return None
-    try:
-        return f"{x:.1f}%"
-    except Exception:
-        return None
+def round_numeric_columns(df: pd.DataFrame):
+    """
+    Apply rounding:
+      - all numeric columns: 2 decimals max
+      - price_vs_ma200: 4 decimals
+    """
+    df2 = df.copy()
+    num_cols = df2.select_dtypes(include=[np.number]).columns.tolist()
+
+    for c in num_cols:
+        if c == "price_vs_ma200":
+            df2[c] = df2[c].round(4)
+        else:
+            df2[c] = df2[c].round(2)
+
+    return df2
 
 
 # ----------------------------
 # Dividend analytics
 # ----------------------------
 def annual_dividends_series(divs: pd.Series) -> pd.Series:
-    """
-    divs: datetime-indexed series of dividends per share.
-    Returns annual sums per calendar year (year-end frequency).
-    """
     if divs is None or len(divs) == 0:
         return pd.Series(dtype=float)
     s = divs.copy()
@@ -189,11 +189,6 @@ def annual_dividends_series(divs: pd.Series) -> pd.Series:
 
 
 def dividend_cagr_n_years(annual: pd.Series, n_years: int):
-    """
-    CAGR on annual dividend sums:
-      (D_end / D_start)^(1/n) - 1
-    Uses latest year as end, and year exactly n years earlier as start.
-    """
     if annual is None or len(annual) < (n_years + 1):
         return None
 
@@ -210,7 +205,6 @@ def dividend_cagr_n_years(annual: pd.Series, n_years: int):
 
     d0 = y_to_val.get(y_start)
     d1 = y_to_val.get(y_end)
-
     if d0 is None or d1 is None or d0 <= 0 or d1 <= 0:
         return None
 
@@ -221,9 +215,6 @@ def dividend_cagr_n_years(annual: pd.Series, n_years: int):
 
 
 def count_div_cuts_10y(annual: pd.Series):
-    """
-    Counts year-over-year decreases in annual dividends within last 10 years.
-    """
     if annual is None or len(annual) < 2:
         return None
 
@@ -251,15 +242,11 @@ def count_div_cuts_10y(annual: pd.Series):
 # Scoring / Recommendations
 # ----------------------------
 def dividend_safety_score(row):
-    """
-    0-100 safety score.
-    Focus: payout discipline, FCF, leverage, quality, avoid yield traps.
-    """
     score = 100.0
 
     payout_eps = row.get("payout_eps")
     payout_fcf = row.get("payout_fcf")
-    fcf_total = row.get("free_cashflow_raw") if row.get("free_cashflow_raw") is not None else row.get("free_cashflow")
+    fcf_total = row.get("free_cashflow_num")
     debt_eq = row.get("debt_to_equity")
     roe = row.get("roe")
     yld = row.get("dividend_yield")
@@ -319,13 +306,10 @@ def dividend_safety_score(row):
     if yld is not None and yld > 0.07:
         score -= 10
 
-    return round(clamp(score, 0.0, 100.0), 1)
+    return round(clamp(score, 0.0, 100.0), 2)
 
 
 def dividend_growth_score(row):
-    """
-    0-100 dividend growth score (CAGR + quality).
-    """
     score = 50.0
 
     cagr5 = row.get("div_cagr_5y")
@@ -362,17 +346,14 @@ def dividend_growth_score(row):
     if debt_eq is not None and debt_eq > 150:
         score -= 8
 
-    return round(clamp(score, 0.0, 100.0), 1)
+    return round(clamp(score, 0.0, 100.0), 2)
 
 
 def yield_trap_flag(row):
-    """
-    High yield + weak coverage/cuts => trap candidate.
-    """
     yld = row.get("dividend_yield")
     payout_fcf = row.get("payout_fcf")
     payout_eps = row.get("payout_eps")
-    fcf_total = row.get("free_cashflow_raw") if row.get("free_cashflow_raw") is not None else row.get("free_cashflow")
+    fcf_total = row.get("free_cashflow_num")
     div_cuts_10y = row.get("div_cuts_10y")
 
     if yld is None:
@@ -389,9 +370,6 @@ def yield_trap_flag(row):
 
 
 def valuation_score_0_5(row):
-    """
-    0-5 valuation heuristic based on PE, EV/EBITDA, price vs MA200, yield vs 5Y avg.
-    """
     score = 2.5
 
     pe = row.get("trailing_pe")
@@ -432,7 +410,7 @@ def valuation_score_0_5(row):
         elif yld <= yld5 * 0.85:
             score -= 0.2
 
-    return round(max(0.0, min(5.0, score)), 1)
+    return round(max(0.0, min(5.0, score)), 2)
 
 
 def valuation_verdict(score_0_5):
@@ -460,9 +438,6 @@ def safety_verdict(safety_0_100):
 
 
 def final_recommendation(row):
-    """
-    Final recommendation = Safety + Valuation + Dividend growth (CAGR).
-    """
     safety = row.get("dividend_safety_score")
     val = row.get("valuation_score_0_5")
     trap = row.get("yield_trap_flag")
@@ -500,67 +475,26 @@ def final_recommendation(row):
 
 
 # ----------------------------
-# KPI Dictionary (for a separate sheet)
+# KPI Dictionary (separate sheet)
 # ----------------------------
 def build_kpi_dictionary_rows():
-    """
-    Keep this list in sync with Snapshot columns. It writes a human-friendly dictionary:
-      KPI | What it is | How it's calculated / source
-    """
+    # Minimal but useful; extend as you like.
     rows = [
-        ("ticker", "Ticker used for yfinance", "Parsed from env TICKERS; exchange prefix removed for yfinance."),
-        ("google_ticker", "Ticker for GoogleFinance formulas", "From env TICKERS; keeps exchange prefix if provided."),
-        ("name", "Company name", "yfinance .info shortName/longName."),
-        ("price", "Latest close price", "Batch yfinance download (10d, 1d interval), last available Close."),
-        ("currency", "Trading currency", "yfinance .info currency."),
-        ("ex_dividend_date", "Ex-dividend date", "yfinance .info exDividendDate (Unix) converted to YYYY-MM-DD."),
-        ("dividend_yield", "Dividend yield (decimal)", "yfinance .info dividendYield (0.03 means 3%)."),
-        ("dividend_yield_pct", "Dividend yield (%)", "dividend_yield * 100."),
-        ("div_per_share_ttm", "Dividend per share (TTM)", "yfinance .info trailingAnnualDividendRate."),
-        ("dividend_rate_fwd", "Forward annual dividend rate", "yfinance .info dividendRate (if available)."),
-        ("eps_ttm", "EPS (TTM)", "yfinance .info trailingEps."),
-        ("payout_eps", "Payout ratio (EPS-based)", "yfinance .info payoutRatio."),
-        ("free_cashflow_fmt", "Free cash flow (formatted)", "yfinance .info freeCashflow formatted to K/M/B/T."),
-        ("free_cashflow_raw", "Free cash flow (raw)", "yfinance .info freeCashflow (numeric)."),
-        ("fcf_per_share_ttm", "FCF per share (TTM)", "free_cashflow / sharesOutstanding."),
-        ("payout_fcf", "Payout ratio (FCF-based)", "(DPS_TTM * sharesOutstanding) / freeCashflow."),
-        ("total_debt_fmt", "Total debt (formatted)", "yfinance .info totalDebt formatted."),
-        ("total_debt_raw", "Total debt (raw)", "yfinance .info totalDebt."),
-        ("total_cash_fmt", "Total cash (formatted)", "yfinance .info totalCash formatted."),
-        ("total_cash_raw", "Total cash (raw)", "yfinance .info totalCash."),
-        ("market_cap_fmt", "Market cap (formatted)", "yfinance .info marketCap formatted."),
-        ("market_cap_raw", "Market cap (raw)", "yfinance .info marketCap."),
-        ("debt_to_equity", "Debt-to-equity (%)", "yfinance .info debtToEquity."),
-        ("roe", "Return on equity", "yfinance .info returnOnEquity."),
-        ("profit_margin", "Profit margin", "yfinance .info profitMargins."),
-        ("beta", "Beta", "yfinance .info beta."),
-        ("net_debt_to_ebitda", "Net debt / EBITDA", "(totalDebt - totalCash) / ebitda (from yfinance .info)."),
-        ("interest_coverage", "Interest coverage", "From income statement: EBIT / |Interest Expense| when available."),
-        ("div_cuts_10y", "Dividend cuts in last 10 years", "Count of years where annual dividends decreased vs previous year."),
-        ("div_cagr_5y_pct", "Dividend CAGR 5Y (%)", "CAGR on annual dividend sums over 5 years, expressed in %."),
-        ("div_cagr_10y_pct", "Dividend CAGR 10Y (%)", "CAGR on annual dividend sums over 10 years, expressed in %."),
-        ("yield_avg_5y", "Average yield (5Y)", "Mean of (annual dividends / avg annual price) across last 5 years."),
-        ("ma200", "200-day moving average", "Average of last 200 daily closes from 5Y price history."),
-        ("price_vs_ma200", "Price vs MA200", "(price / ma200) - 1."),
-        ("trailing_pe", "Trailing P/E", "yfinance .info trailingPE."),
-        ("forward_pe", "Forward P/E", "yfinance .info forwardPE."),
-        ("price_to_book", "Price-to-book", "yfinance .info priceToBook."),
-        ("ev_ebitda", "EV/EBITDA", "yfinance .info enterpriseToEbitda."),
-        ("ath_price", "All-time-high price (Close, adjusted)", "Max daily Close from yfinance period='max' (auto_adjust=True)."),
-        ("percentage_vs_ath_pct", "Distance vs ATH (%)", "(price / ath_price - 1) * 100."),
-        ("buy_the_dip_20_ath", "Buy the dip flag (<= -20% ATH)", "Google Sheets formula: IF(price <= 0.8*ATH,'BUY NOW','WAIT')."),
-        ("sparkline_1y", "1-year price sparkline", "Google Sheets formula using GOOGLEFINANCE over last 365 days."),
-        ("dividend_safety_score", "Dividend Safety Score (0-100)", "Heuristic using payout, FCF, leverage, cuts, yield."),
-        ("safety_score_0_5", "Safety Score (0-5)", "dividend_safety_score mapped to 0-5."),
-        ("safety_verdict", "Safety verdict", "PASS / BORDERLINE / FAIL based on safety score."),
-        ("valuation_score_0_5", "Valuation Score (0-5)", "Heuristic using P/E, EV/EBITDA, price vs MA200, yield vs avg."),
-        ("valuation_verdict", "Valuation verdict", "UNDERVALUED / FAIR / RICH / VERY RICH."),
-        ("dividend_growth_score", "Dividend Growth Score (0-100)", "Uses CAGR(5/10Y) + ROE + payout + leverage."),
-        ("yield_trap_flag", "Yield trap flag", "High yield + weak coverage/cuts/negative FCF => True."),
-        ("final_recommendation", "Final recommendation", "Combines Safety + Valuation + Dividend Growth."),
-        ("final_reason", "Why the recommendation", "Short explanation string."),
+        ("dividend_safety_score", "Dividend Safety Score (0-100)", "Heuristic from payout ratios, FCF, leverage, cuts."),
+        ("valuation_score_0_5", "Valuation Score (0-5)", "Heuristic from P/E, EV/EBITDA, MA200, yield vs avg."),
+        ("dividend_growth_score", "Dividend Growth Score (0-100)", "Uses dividend CAGR + ROE + payout + leverage."),
+        ("payout_fcf", "Payout ratio (FCF)", "(TTM dividends total) / free cash flow."),
+        ("payout_eps", "Payout ratio (EPS)", "From yfinance payoutRatio."),
+        ("net_debt_to_ebitda", "Net Debt / EBITDA", "(Debt - Cash) / EBITDA."),
+        ("percentage_vs_ath_pct", "% vs ATH", "(price/ATH - 1)*100."),
+        ("sparkline_1y", "1Y sparkline", 'Formula: SPARKLINE(GOOGLEFINANCE(google_ticker,"price",TODAY()-365,TODAY())).'),
+        ("buy_the_dip_20_ath", "Buy the dip (<= -20% ATH)", 'Formula: IF(price <= 0.8*ATH,"BUY NOW","WAIT").'),
+        ("market_cap", "Market cap (formatted)", "From yfinance marketCap formatted as K/M/B/T."),
+        ("free_cashflow", "Free cash flow (formatted)", "From yfinance freeCashflow formatted as K/M/B/T."),
+        ("total_debt", "Total debt (formatted)", "From yfinance totalDebt formatted as K/M/B/T."),
+        ("total_cash", "Total cash (formatted)", "From yfinance totalCash formatted as K/M/B/T."),
+        ("ath_price", "ATH price (formatted)", "Max adjusted close from yfinance period='max'."),
     ]
-
     out = [["kpi", "meaning", "how_calculated_or_source"]]
     out.extend([list(r) for r in rows])
     return out
@@ -570,10 +504,6 @@ def build_kpi_dictionary_rows():
 # Data extraction / features
 # ----------------------------
 def get_snapshot(ticker_items):
-    """
-    ticker_items: list of {"yf": "...", "google": "..."}
-    Returns a dataframe of KPIs + formulas.
-    """
     rows = []
     as_of_date = datetime.now(timezone.utc).date().isoformat()
 
@@ -583,7 +513,6 @@ def get_snapshot(ticker_items):
 
     tickers_str = " ".join(yf_tickers)
 
-    # Latest close (robust)
     px_short = yf.download(
         tickers=tickers_str,
         period="10d",
@@ -594,7 +523,6 @@ def get_snapshot(ticker_items):
         progress=False,
     )
 
-    # 5Y for MA200, yield calculations
     px_5y = yf.download(
         tickers=tickers_str,
         period="5y",
@@ -605,7 +533,6 @@ def get_snapshot(ticker_items):
         progress=False,
     )
 
-    # MAX for ATH
     px_max = yf.download(
         tickers=tickers_str,
         period="max",
@@ -620,13 +547,12 @@ def get_snapshot(ticker_items):
 
     for t in yf_tickers:
         tk = yf.Ticker(t)
-
         try:
             info = tk.info or {}
         except Exception:
             info = {}
 
-        # Latest close from batch
+        # Latest close
         last_close = None
         try:
             if len(yf_tickers) == 1:
@@ -639,10 +565,10 @@ def get_snapshot(ticker_items):
         shares = to_num(info.get("sharesOutstanding"))
         trailing_eps = to_num(info.get("trailingEps"))
         ebitda = to_num(info.get("ebitda"))
-        total_debt = to_num(info.get("totalDebt"))
-        total_cash = to_num(info.get("totalCash"))
-        fcf_total = to_num(info.get("freeCashflow"))
-        market_cap = to_num(info.get("marketCap"))
+        total_debt_num = to_num(info.get("totalDebt"))
+        total_cash_num = to_num(info.get("totalCash"))
+        fcf_total_num = to_num(info.get("freeCashflow"))
+        market_cap_num = to_num(info.get("marketCap"))
 
         dps_ttm = to_num(info.get("trailingAnnualDividendRate"))
         yld = to_num(info.get("dividendYield"))
@@ -650,19 +576,19 @@ def get_snapshot(ticker_items):
 
         ex_dividend_date = unix_to_iso_date(info.get("exDividendDate"))
 
-        fcf_per_share = safe_div(fcf_total, shares)
+        fcf_per_share = safe_div(fcf_total_num, shares)
 
         dividends_ttm_total = None
         if dps_ttm is not None and shares is not None:
             dividends_ttm_total = dps_ttm * shares
-        payout_fcf = safe_div(dividends_ttm_total, fcf_total)
+        payout_fcf = safe_div(dividends_ttm_total, fcf_total_num)
 
         net_debt = None
-        if total_debt is not None and total_cash is not None:
-            net_debt = total_debt - total_cash
+        if total_debt_num is not None and total_cash_num is not None:
+            net_debt = total_debt_num - total_cash_num
         net_debt_to_ebitda = safe_div(net_debt, ebitda)
 
-        # Interest coverage (EBIT / |Interest Expense|) if possible
+        # Interest coverage
         interest_coverage = None
         try:
             fin = tk.financials
@@ -680,7 +606,7 @@ def get_snapshot(ticker_items):
         except Exception:
             pass
 
-        # Dividends history: cuts + CAGR
+        # Dividend history
         div_cuts_10y = None
         div_cagr_5y = None
         div_cagr_10y = None
@@ -694,7 +620,7 @@ def get_snapshot(ticker_items):
         except Exception:
             pass
 
-        # MA200 + price vs MA200
+        # MA200
         ma200 = None
         price_vs_ma200 = None
         try:
@@ -729,21 +655,21 @@ def get_snapshot(ticker_items):
         except Exception:
             pass
 
-        # ATH (All-time-high) from max history
-        ath_price = None
+        # ATH
+        ath_price_num = None
         try:
             if len(yf_tickers) == 1:
                 close_max = px_max["Close"].dropna()
             else:
                 close_max = px_max[t]["Close"].dropna()
             if len(close_max) > 0:
-                ath_price = float(close_max.max())
+                ath_price_num = float(close_max.max())
         except Exception:
             pass
 
-        percentage_vs_ath = None
-        if last_close is not None and ath_price not in (None, 0, 0.0):
-            percentage_vs_ath = (last_close / ath_price - 1.0) * 100.0
+        percentage_vs_ath_pct = None
+        if last_close is not None and ath_price_num not in (None, 0, 0.0):
+            percentage_vs_ath_pct = (last_close / ath_price_num - 1.0) * 100.0
 
         google_ticker = yf_to_google.get(t, t)
 
@@ -754,6 +680,14 @@ def get_snapshot(ticker_items):
             "name": info.get("shortName") or info.get("longName"),
             "price": last_close,
             "currency": info.get("currency"),
+
+            # Formulas
+            "sparkline_1y": "",
+            "buy_the_dip_20_ath": "",
+
+            # ATH / Dip
+            "ath_price_num": ath_price_num,
+            "percentage_vs_ath_pct": percentage_vs_ath_pct,
 
             # Dividend basics
             "dividend_yield": yld,
@@ -782,18 +716,13 @@ def get_snapshot(ticker_items):
             "ma200": ma200,
             "price_vs_ma200": price_vs_ma200,
 
-            # ATH / Dip
-            "ath_price": ath_price,
-            "percentage_vs_ath_pct": percentage_vs_ath,   # numeric percent
-            "percentage_vs_ath_str": pct_str(percentage_vs_ath),
+            # Big-number fundamentals (numeric for scoring, will be formatted for display)
+            "market_cap_num": market_cap_num,
+            "free_cashflow_num": fcf_total_num,
+            "total_debt_num": total_debt_num,
+            "total_cash_num": total_cash_num,
 
-            # Big-number fundamentals (RAW)
-            "market_cap": market_cap,
-            "free_cashflow": fcf_total,
-            "total_debt": total_debt,
-            "total_cash": total_cash,
-
-            # Other useful fundamentals
+            # Other
             "debt_to_equity": to_num(info.get("debtToEquity")),
             "roe": to_num(info.get("returnOnEquity")),
             "profit_margin": to_num(info.get("profitMargins")),
@@ -821,29 +750,29 @@ def get_snapshot(ticker_items):
     df["div_cagr_5y_pct"] = df["div_cagr_5y"].apply(lambda x: (x * 100.0) if x is not None else None)
     df["div_cagr_10y_pct"] = df["div_cagr_10y"].apply(lambda x: (x * 100.0) if x is not None else None)
 
-    # Compact formatting for large money-like fields (plus ATH)
-    money_like_cols = ["market_cap", "free_cashflow", "total_debt", "total_cash", "ath_price"]
-    for c in money_like_cols:
-        if c in df.columns:
-            df[c + "_raw"] = df[c]
-            df[c + "_fmt"] = df[c].apply(compact_number)
+    # Rounding (on numerics)
+    df = round_numeric_columns(df)
 
-    # ---- Google Sheets formulas (row-wise, robust to column order) ----
-    # SPARKLINE_1Y: SPARKLINE(GOOGLEFINANCE(google_ticker,"price",TODAY()-365,TODAY()))
+    # ---- Create formatted-only display columns (remove redundant raw columns later) ----
+    df["market_cap"] = df["market_cap_num"].apply(compact_number)
+    df["free_cashflow"] = df["free_cashflow_num"].apply(compact_number)
+    df["total_debt"] = df["total_debt_num"].apply(compact_number)
+    df["total_cash"] = df["total_cash_num"].apply(compact_number)
+    df["ath_price"] = df["ath_price_num"].apply(compact_number)
+
+    # ---- Google Sheets formulas (robust to column order) ----
     df["sparkline_1y"] = (
         '=SPARKLINE(GOOGLEFINANCE('
         'INDEX($A:$ZZ,ROW(),MATCH("google_ticker",$1:$1,0))'
         ',"price",TODAY()-365,TODAY()))'
     )
-
-    # Buy The Dip (-20%ATH): IF(0.8*ATH >= price, "BUY NOW", "WAIT")
     df["buy_the_dip_20_ath"] = (
-        '=IF(0.8*INDEX($A:$ZZ,ROW(),MATCH("ath_price",$1:$1,0))'
+        '=IF(0.8*INDEX($A:$ZZ,ROW(),MATCH("ath_price_num",$1:$1,0))'
         '>=INDEX($A:$ZZ,ROW(),MATCH("price",$1:$1,0))'
         ',"BUY NOW","WAIT")'
     )
 
-    # Column order (Snapshot-friendly). Use *_fmt for big numbers.
+    # Final column set (keep only formatted big numbers; keep ath_price_num for formulas & gradients)
     preferred_cols = [
         "as_of_date",
         "ticker",
@@ -852,9 +781,7 @@ def get_snapshot(ticker_items):
         "price",
         "currency",
         "sparkline_1y",
-        "ath_price",          # numeric
-        "ath_price_fmt",      # formatted
-        "percentage_vs_ath_str",
+        "ath_price",
         "percentage_vs_ath_pct",
         "buy_the_dip_20_ath",
         "final_recommendation",
@@ -876,8 +803,6 @@ def get_snapshot(ticker_items):
 
         "div_cagr_5y_pct",
         "div_cagr_10y_pct",
-        "div_cagr_5y",
-        "div_cagr_10y",
 
         "fcf_per_share_ttm",
         "payout_fcf",
@@ -895,28 +820,129 @@ def get_snapshot(ticker_items):
         "ma200",
         "price_vs_ma200",
 
-        "market_cap_fmt",
-        "free_cashflow_fmt",
-        "total_debt_fmt",
-        "total_cash_fmt",
+        "market_cap",
+        "free_cashflow",
+        "total_debt",
+        "total_cash",
 
         "debt_to_equity",
         "roe",
         "profit_margin",
         "beta",
 
-        # Keep raw versions at the end (optional, useful for debugging/analytics)
-        "market_cap_raw",
-        "free_cashflow_raw",
-        "total_debt_raw",
-        "total_cash_raw",
-        "ath_price_raw",
+        # Hidden/helper numeric columns for formulas/conditional formatting (kept but can be hidden in Sheets UI)
+        "ath_price_num",
+        "market_cap_num",
+        "free_cashflow_num",
+        "total_debt_num",
+        "total_cash_num",
     ]
 
-    cols = [c for c in preferred_cols if c in df.columns] + [c for c in df.columns if c not in preferred_cols]
+    cols = [c for c in preferred_cols if c in df.columns]
     df = df[cols]
 
     return df
+
+
+# ----------------------------
+# Google Sheets formatting helpers
+# ----------------------------
+def freeze_panes(ws, rows=1, cols=2):
+    """
+    Freeze first row and first N columns.
+    """
+    try:
+        ws.freeze(rows=rows, cols=cols)
+    except Exception:
+        sh = ws.spreadsheet
+        sh.batch_update({
+            "requests": [{
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": ws.id,
+                        "gridProperties": {
+                            "frozenRowCount": rows,
+                            "frozenColumnCount": cols
+                        }
+                    },
+                    "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
+                }
+            }]
+        })
+
+
+def col_index(header, col_name):
+    try:
+        return header.index(col_name)
+    except ValueError:
+        return None
+
+
+def add_gradient_conditional_formats(sh, ws, header, n_rows):
+    """
+    Gradient rules:
+      - green for good
+      - red for bad
+    Uses ColorScale rules.
+    """
+    sheet_id = ws.id
+
+    def grid_range(col_name):
+        c = col_index(header, col_name)
+        if c is None:
+            return None
+        return {
+            "sheetId": sheet_id,
+            "startRowIndex": 1,
+            "endRowIndex": max(2, n_rows + 1),
+            "startColumnIndex": c,
+            "endColumnIndex": c + 1,
+        }
+
+    def rgb(r, g, b):
+        return {"red": r, "green": g, "blue": b}
+
+    requests = []
+
+    def add_scale(col, min_v, mid_v, max_v, min_color, mid_color, max_color):
+        gr = grid_range(col)
+        if not gr:
+            return
+        requests.append({
+            "addConditionalFormatRule": {
+                "rule": {
+                    "ranges": [gr],
+                    "gradientRule": {
+                        "minpoint": {"type": "NUMBER", "value": str(min_v), "color": min_color},
+                        "midpoint": {"type": "NUMBER", "value": str(mid_v), "color": mid_color},
+                        "maxpoint": {"type": "NUMBER", "value": str(max_v), "color": max_color},
+                    }
+                },
+                "index": 0
+            }
+        })
+
+    # Colors
+    red = rgb(0.96, 0.80, 0.80)
+    yellow = rgb(1.00, 0.95, 0.80)
+    green = rgb(0.80, 0.94, 0.80)
+
+    # "Higher is better"
+    add_scale("dividend_safety_score", 40, 70, 95, red, yellow, green)
+    add_scale("valuation_score_0_5", 1.5, 3.0, 4.5, red, yellow, green)
+    add_scale("dividend_growth_score", 20, 55, 85, red, yellow, green)
+
+    # "Lower is better" => invert min/max (green at low)
+    add_scale("payout_fcf", 0.2, 0.65, 1.2, green, yellow, red)
+    add_scale("payout_eps", 0.2, 0.6, 1.0, green, yellow, red)
+    add_scale("net_debt_to_ebitda", 0.5, 2.0, 5.0, green, yellow, red)
+    add_scale("div_cuts_10y", 0, 1, 3, green, yellow, red)
+
+    # % vs ATH: more negative is better dip (green at -40, yellow at -20, red at 0)
+    add_scale("percentage_vs_ath_pct", -40, -20, 0, green, yellow, red)
+
+    if requests:
+        sh.batch_update({"requests": requests})
 
 
 # ----------------------------
@@ -932,28 +958,25 @@ def gsheets_client():
     return gspread.authorize(creds)
 
 
-def upsert_sheet(ws, df: pd.DataFrame):
+def upsert_sheet_user_entered(ws, df: pd.DataFrame):
     ws.clear()
-    ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+    ws.update([df.columns.tolist()] + df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
 
 
 def ensure_same_schema_or_reset(ws, desired_header):
-    """
-    If History header differs from Snapshot header, reset History header.
-    """
     existing = ws.get_all_values()
     if not existing:
         return
     header = existing[0]
     if header != desired_header:
         ws.clear()
-        ws.update([desired_header])
+        ws.update([desired_header], value_input_option="USER_ENTERED")
 
 
 def append_history(ws, df, key_cols=("as_of_date", "ticker")):
     existing = ws.get_all_values()
     if not existing:
-        ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+        ws.update([df.columns.tolist()] + df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
         return
 
     header = existing[0]
@@ -962,7 +985,7 @@ def append_history(ws, df, key_cols=("as_of_date", "ticker")):
     col_idx = {name: i for i, name in enumerate(header)}
     if not all(c in col_idx for c in key_cols):
         ws.clear()
-        ws.update([df.columns.tolist()] + df.fillna("").values.tolist())
+        ws.update([df.columns.tolist()] + df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
         return
 
     existing_keys = set()
@@ -982,17 +1005,15 @@ def append_history(ws, df, key_cols=("as_of_date", "ticker")):
 
 
 def upsert_kpi_dictionary(sh, tab_name="KPI_Dictionary"):
-    """
-    Creates/overwrites a separate sheet with a KPI dictionary.
-    """
     try:
         ws = sh.worksheet(tab_name)
     except Exception:
-        ws = sh.add_worksheet(title=tab_name, rows=2000, cols=5)
+        ws = sh.add_worksheet(title=tab_name, rows=2000, cols=6)
 
     data = build_kpi_dictionary_rows()
     ws.clear()
-    ws.update(data)
+    ws.update(data, value_input_option="USER_ENTERED")
+    freeze_panes(ws, rows=1, cols=2)
 
 
 def main():
@@ -1013,41 +1034,36 @@ def main():
         raise RuntimeError("No tickers or no data returned.")
 
     gc = gsheets_client()
-
-    if sheet_id:
-        sh = gc.open_by_key(sheet_id)
-    else:
-        sh = gc.open(sheet_name)
+    sh = gc.open_by_key(sheet_id) if sheet_id else gc.open(sheet_name)
 
     # Ensure worksheets exist
     try:
         ws_snap = sh.worksheet(snapshot_tab)
     except Exception:
-        ws_snap = sh.add_worksheet(title=snapshot_tab, rows=2000, cols=160)
+        ws_snap = sh.add_worksheet(title=snapshot_tab, rows=2000, cols=200)
 
     try:
         ws_hist = sh.worksheet(history_tab)
     except Exception:
-        ws_hist = sh.add_worksheet(title=history_tab, rows=20000, cols=160)
+        ws_hist = sh.add_worksheet(title=history_tab, rows=20000, cols=200)
 
-    # Snapshot overwrite (USER_ENTERED so formulas work)
-    ws_snap.clear()
-    ws_snap.update([df.columns.tolist()] + df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
+    # Snapshot overwrite
+    upsert_sheet_user_entered(ws_snap, df)
+    freeze_panes(ws_snap, rows=1, cols=2)
 
-    # Keep History schema identical to Snapshot schema; reset if schema changed
-    ensure_same_schema_or_reset(ws_hist, df.columns.tolist())
+    # Gradient conditional formatting on Snapshot
+    header = df.columns.tolist()
+    add_gradient_conditional_formats(sh, ws_snap, header, n_rows=len(df))
 
-    # Append History (idempotent, USER_ENTERED so formulas store correctly)
-    existing = ws_hist.get_all_values()
-    if not existing:
-        ws_hist.update([df.columns.tolist()] + df.fillna("").values.tolist(), value_input_option="USER_ENTERED")
-    else:
-        append_history(ws_hist, df)
+    # History schema sync + append
+    ensure_same_schema_or_reset(ws_hist, header)
+    append_history(ws_hist, df)
+    freeze_panes(ws_hist, rows=1, cols=2)
 
-    # KPI Dictionary in another sheet
+    # KPI dictionary sheet
     upsert_kpi_dictionary(sh, tab_name=dictionary_tab)
 
-    print("OK: Snapshot overwritten; History appended; KPI_Dictionary updated; schema kept in sync.")
+    print("OK: Snapshot + History updated; freezes applied; gradient conditional formatting applied; KPI_Dictionary updated.")
 
 
 if __name__ == "__main__":
