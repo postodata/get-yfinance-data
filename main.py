@@ -50,11 +50,6 @@ def clamp(x, lo=0.0, hi=100.0):
 
 
 def compact_number(x):
-    """
-    10500000 -> '10.50M'
-    10500000000 -> '10.50B'
-    Keeps sign. Returns None for missing.
-    """
     if x is None:
         return None
     try:
@@ -77,10 +72,6 @@ def compact_number(x):
 
 
 def unix_to_iso_date(x):
-    """
-    Converts Unix timestamp (seconds or ms) or date-like to ISO 'YYYY-MM-DD'.
-    Returns None if conversion fails.
-    """
     if x in (None, "", 0):
         return None
 
@@ -108,13 +99,6 @@ def unix_to_iso_date(x):
 
 
 def parse_tickers(raw: str):
-    """
-    Accepts:
-      - "NYSE:UL, NASDAQ:MSFT" (commas or newlines)
-      - "PG, MSFT"
-    Returns list of dicts:
-      {"yf": "UL", "google": "NYSE:UL"}
-    """
     if not raw:
         return []
 
@@ -153,11 +137,6 @@ def map_0_100_to_0_5(score):
 
 
 def round_numeric_columns(df: pd.DataFrame):
-    """
-    Apply rounding:
-      - all numeric columns: 2 decimals max
-      - price_vs_ma200: 4 decimals
-    """
     df2 = df.copy()
     num_cols = df2.select_dtypes(include=[np.number]).columns.tolist()
     for c in num_cols:
@@ -166,6 +145,16 @@ def round_numeric_columns(df: pd.DataFrame):
         else:
             df2[c] = df2[c].round(2)
     return df2
+
+
+def col_to_a1(col_idx_0_based: int) -> str:
+    # 0 -> A, 25 -> Z, 26 -> AA, ...
+    n = col_idx_0_based + 1
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
 
 
 # ----------------------------
@@ -652,7 +641,6 @@ def get_snapshot(ticker_items):
 
             if len(close_max) > 0:
                 ath_price_num = float(close_max.max())
-
                 idx = close_max[close_max == close_max.max()].index
                 if len(idx) > 0:
                     dt = pd.to_datetime(idx[0]).to_pydatetime().date()
@@ -722,7 +710,7 @@ def get_snapshot(ticker_items):
             "total_debt": compact_number(total_debt_num),
             "total_cash": compact_number(total_cash_num),
 
-            # Internal numeric for scoring only (will NOT be output)
+            # Internal numeric for scoring only (NOT output)
             "_free_cashflow_num": fcf_total_num,
 
             # Other
@@ -754,14 +742,11 @@ def get_snapshot(ticker_items):
     df["final_recommendation"] = final[0]
     df["final_reason"] = final[1]
 
-    # CAGR % columns
     df["div_cagr_5y_pct"] = df["div_cagr_5y"].apply(lambda x: (x * 100.0) if x is not None else None)
     df["div_cagr_10y_pct"] = df["div_cagr_10y"].apply(lambda x: (x * 100.0) if x is not None else None)
 
-    # Rounding (numeric display columns)
     df = round_numeric_columns(df)
 
-    # SPARKLINE formula (robust to column order)
     df["sparkline_1y"] = (
         '=SPARKLINE(GOOGLEFINANCE('
         'INDEX($A:$ZZ,ROW(),MATCH("google_ticker",$1:$1,0))'
@@ -771,70 +756,21 @@ def get_snapshot(ticker_items):
     # Remove internal-only columns
     df = df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore")
 
-    # Final column set (no *_num columns)
     preferred_cols = [
-        "as_of_date",
-        "ticker",
-        "google_ticker",
-        "name",
-        "price",
-        "currency",
-        "sparkline_1y",
-        "ath_price",
-        "ath_date",
-        "ath_days_since",
-        "percentage_vs_ath_pct",
-        "buy_the_dip_20_ath",
-        "final_recommendation",
-        "final_reason",
-
-        "dividend_safety_score",
-        "safety_score_0_5",
-        "safety_verdict",
-        "valuation_score_0_5",
-        "valuation_verdict",
-        "dividend_growth_score",
-        "yield_trap_flag",
-
-        "dividend_yield_pct",
-        "dividend_yield",
-        "div_per_share_ttm",
-        "dividend_rate_fwd",
-        "ex_dividend_date",
-
-        "div_cagr_5y_pct",
-        "div_cagr_10y_pct",
-
-        "fcf_per_share_ttm",
-        "payout_fcf",
-        "eps_ttm",
-        "payout_eps",
-        "net_debt_to_ebitda",
-        "interest_coverage",
-        "div_cuts_10y",
-
-        "trailing_pe",
-        "forward_pe",
-        "ev_ebitda",
-        "price_to_book",
-        "yield_avg_5y",
-        "ma200",
-        "price_vs_ma200",
-
-        "market_cap",
-        "free_cashflow",
-        "total_debt",
-        "total_cash",
-
-        "debt_to_equity",
-        "roe",
-        "profit_margin",
-        "beta",
+        "as_of_date","ticker","google_ticker","name","price","currency","sparkline_1y",
+        "ath_price","ath_date","ath_days_since","percentage_vs_ath_pct","buy_the_dip_20_ath",
+        "final_recommendation","final_reason",
+        "dividend_safety_score","safety_score_0_5","safety_verdict",
+        "valuation_score_0_5","valuation_verdict","dividend_growth_score","yield_trap_flag",
+        "dividend_yield_pct","dividend_yield","div_per_share_ttm","dividend_rate_fwd","ex_dividend_date",
+        "div_cagr_5y_pct","div_cagr_10y_pct",
+        "fcf_per_share_ttm","payout_fcf","eps_ttm","payout_eps","net_debt_to_ebitda","interest_coverage","div_cuts_10y",
+        "trailing_pe","forward_pe","ev_ebitda","price_to_book","yield_avg_5y","ma200","price_vs_ma200",
+        "market_cap","free_cashflow","total_debt","total_cash",
+        "debt_to_equity","roe","profit_margin","beta",
     ]
     cols = [c for c in preferred_cols if c in df.columns] + [c for c in df.columns if c not in preferred_cols]
-    df = df[cols]
-
-    return df
+    return df[cols]
 
 
 # ----------------------------
@@ -848,13 +784,7 @@ def freeze_panes(ws, rows=1, cols=2):
         sh.batch_update({
             "requests": [{
                 "updateSheetProperties": {
-                    "properties": {
-                        "sheetId": ws.id,
-                        "gridProperties": {
-                            "frozenRowCount": rows,
-                            "frozenColumnCount": cols
-                        }
-                    },
+                    "properties": {"sheetId": ws.id, "gridProperties": {"frozenRowCount": rows, "frozenColumnCount": cols}},
                     "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
                 }
             }]
@@ -933,9 +863,11 @@ def add_gradient_conditional_formats_and_bold(sh, ws, header, n_rows):
     # % vs ATH: more negative is better dip
     add_scale("percentage_vs_ath_pct", -40, -20, 0, green, yellow, red)
 
-    # Bold entire rows where final_recommendation == STRONG BUY
+    # Bold entire rows where final_recommendation == STRONG BUY (FIXED formula)
     rec_col = col_index(header, "final_recommendation")
     if rec_col is not None:
+        col_letter = col_to_a1(rec_col)
+        formula = f'=${col_letter}2="STRONG BUY"'
         requests.append({
             "addConditionalFormatRule": {
                 "rule": {
@@ -943,7 +875,7 @@ def add_gradient_conditional_formats_and_bold(sh, ws, header, n_rows):
                     "booleanRule": {
                         "condition": {
                             "type": "CUSTOM_FORMULA",
-                            "values": [{"userEnteredValue": f'=$${chr(65+rec_col)}2="STRONG BUY"'}]
+                            "values": [{"userEnteredValue": formula}]
                         },
                         "format": {"textFormat": {"bold": True}}
                     }
@@ -951,8 +883,6 @@ def add_gradient_conditional_formats_and_bold(sh, ws, header, n_rows):
                 "index": 0
             }
         })
-    # Note: above A1 col letter works only up to Z; for wider sheets we'd need R1C1.
-    # Our Snapshot width here is under 26 columns for the core set; if you expand beyond Z, switch to R1C1.
 
     if requests:
         sh.batch_update({"requests": requests})
@@ -1059,19 +989,16 @@ def main():
     except Exception:
         ws_hist = sh.add_worksheet(title=history_tab, rows=20000, cols=200)
 
-    # Snapshot overwrite
     upsert_sheet_user_entered(ws_snap, df)
     freeze_panes(ws_snap, rows=1, cols=2)
 
     header = df.columns.tolist()
     add_gradient_conditional_formats_and_bold(sh, ws_snap, header, n_rows=len(df))
 
-    # History schema sync + append
     ensure_same_schema_or_reset(ws_hist, header)
     append_history(ws_hist, df)
     freeze_panes(ws_hist, rows=1, cols=2)
 
-    # KPI dictionary sheet
     upsert_kpi_dictionary(sh, tab_name=dictionary_tab)
 
     print("OK: Snapshot + History updated; freezes applied; gradients applied; STRONG BUY rows bolded; KPI_Dictionary updated.")
