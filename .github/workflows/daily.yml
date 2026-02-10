@@ -70,6 +70,19 @@ jobs:
             VICI
             XOM
             ZTS
+            ETR:RHM
+            EPA:DG
+            EPA:SNA
+            EPA:TTE
+            EPA:PUB
+            AMS:UNA
+            AMS:AD
+            AMS:INGA
+            AMS:SHELL 
+            RIO 
+            TM 
+            HSBC
+            VZ
           SHEET_NAME: "Stocks_Dividends_Core_OS"
           SNAPSHOT_TAB: "Snapshot"
           HISTORY_TAB: "History"
