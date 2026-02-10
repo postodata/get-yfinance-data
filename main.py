@@ -99,6 +99,12 @@ def unix_to_iso_date(x):
 
 
 def parse_tickers(raw: str):
+    """
+    Accepts either:
+      - 'AAPL,MSFT'
+      - 'EPA:TTE,AMS:INGA' (Google Finance tickers)
+    It keeps google_ticker with exchange prefix, but yfinance ticker remains the suffix after ':'.
+    """
     if not raw:
         return []
 
@@ -155,6 +161,42 @@ def col_to_a1(col_idx_0_based: int) -> str:
         n, r = divmod(n - 1, 26)
         s = chr(65 + r) + s
     return s
+
+
+def currency_from_google_ticker(google_ticker: str):
+    """
+    Derive display currency from Google Finance exchange prefixes.
+    Examples:
+      - 'EPA:TTE'  -> EUR
+      - 'AMS:INGA' -> EUR
+      - 'ETR:RHM'  -> EUR
+      - 'AAPL'     -> None (unknown; fallback to yfinance info)
+    """
+    if not google_ticker or ":" not in google_ticker:
+        return None
+
+    exch = google_ticker.split(":", 1)[0].upper().strip()
+
+    EUR_EXCH = {"EPA", "AMS", "ETR"}
+    if exch in EUR_EXCH:
+        return "EUR"
+
+    # Extend here if you add more exchanges later.
+    return None
+
+
+def norm_weights(pairs):
+    """
+    pairs: list of (value_or_none, weight)
+    Returns normalized weights for non-null values.
+    """
+    w = [(v, wt) for v, wt in pairs if v is not None and wt is not None and wt > 0]
+    if not w:
+        return []
+    total = sum(wt for _, wt in w)
+    if total <= 0:
+        return []
+    return [(v, wt / total) for v, wt in w]
 
 
 # ----------------------------
@@ -223,11 +265,49 @@ def count_div_cuts_10y(annual: pd.Series):
     return cuts
 
 
+def dividend_streak_years(annual: pd.Series):
+    """
+    Consecutive years up to last year with no annual dividend decrease.
+    Conservative: any decrease resets streak.
+    """
+    if annual is None or len(annual) < 2:
+        return None
+
+    s = annual.sort_index()
+    vals = [float(v) for v in s.values]
+    if not vals:
+        return None
+
+    streak = 1
+    for i in range(len(vals) - 1, 0, -1):
+        if vals[i] >= vals[i - 1]:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 # ----------------------------
-# Scoring / Recommendations
+# Scoring / Recommendations (sector-aware + explainable)
 # ----------------------------
-def dividend_safety_score(row):
+def _sector_key(sector: str):
+    if not sector:
+        return None
+    return str(sector).strip().lower()
+
+
+def dividend_safety_score_with_notes(row):
+    """
+    Returns: (score_0_100, notes_str)
+    Sector-aware tweaks:
+      - Real Estate: payout EPS is not very meaningful (REITs); reduce its impact.
+      - Financial Services: debt_to_equity and net_debt_to_ebitda are not comparable; reduce their impact.
+    """
+    sector = row.get("sector")
+    sk = _sector_key(sector)
+
     score = 100.0
+    notes = []
 
     payout_eps = row.get("payout_eps")
     payout_fcf = row.get("payout_fcf")
@@ -239,59 +319,101 @@ def dividend_safety_score(row):
     net_debt_to_ebitda = row.get("net_debt_to_ebitda")
     interest_cov = row.get("interest_coverage")
 
+    eps_penalty_multiplier = 1.0
+    leverage_penalty_multiplier = 1.0
+
+    if sk == "real estate":
+        eps_penalty_multiplier = 0.35
+        notes.append("Sector=Real Estate: payout EPS penalties reduced (REITs often use AFFO/FFO).")
+
+    if sk in ("financial services", "financial"):
+        leverage_penalty_multiplier = 0.35
+        notes.append("Sector=Financial: leverage penalties reduced (bank balance sheets differ).")
+
     if div_cuts_10y is not None:
         if div_cuts_10y >= 2:
             score -= 25
+            notes.append("Dividend cuts (10y) >=2: -25")
         elif div_cuts_10y == 1:
             score -= 15
+            notes.append("Dividend cuts (10y) ==1: -15")
 
     if payout_eps is not None:
         if payout_eps > 0.9:
-            score -= 30
+            p = 30 * eps_penalty_multiplier
+            score -= p
+            notes.append(f"Payout (EPS) >0.90: -{p:.1f}")
         elif payout_eps > 0.75:
-            score -= 18
+            p = 18 * eps_penalty_multiplier
+            score -= p
+            notes.append(f"Payout (EPS) >0.75: -{p:.1f}")
         elif payout_eps > 0.6:
-            score -= 8
+            p = 8 * eps_penalty_multiplier
+            score -= p
+            notes.append(f"Payout (EPS) >0.60: -{p:.1f}")
 
     if payout_fcf is not None:
         if payout_fcf > 1.0:
             score -= 25
+            notes.append("Payout (FCF) >1.00: -25")
         elif payout_fcf > 0.8:
             score -= 12
+            notes.append("Payout (FCF) >0.80: -12")
         elif payout_fcf > 0.65:
             score -= 6
+            notes.append("Payout (FCF) >0.65: -6")
 
     if fcf_total is not None and fcf_total <= 0:
         score -= 25
+        notes.append("Free cash flow <=0: -25")
 
     if net_debt_to_ebitda is not None:
         if net_debt_to_ebitda > 4.0:
-            score -= 18
+            p = 18 * leverage_penalty_multiplier
+            score -= p
+            notes.append(f"Net debt/EBITDA >4.0: -{p:.1f}")
         elif net_debt_to_ebitda > 3.0:
-            score -= 10
+            p = 10 * leverage_penalty_multiplier
+            score -= p
+            notes.append(f"Net debt/EBITDA >3.0: -{p:.1f}")
 
     if debt_eq is not None:
         if debt_eq > 200:
-            score -= 15
+            p = 15 * leverage_penalty_multiplier
+            score -= p
+            notes.append(f"Debt/Equity >200: -{p:.1f}")
         elif debt_eq > 120:
-            score -= 8
+            p = 8 * leverage_penalty_multiplier
+            score -= p
+            notes.append(f"Debt/Equity >120: -{p:.1f}")
 
     if interest_cov is not None:
         if interest_cov < 3:
             score -= 12
+            notes.append("Interest coverage <3: -12")
         elif interest_cov < 5:
             score -= 6
+            notes.append("Interest coverage <5: -6")
 
     if roe is not None:
         if roe < 0.06:
             score -= 8
+            notes.append("ROE <6%: -8")
         elif roe > 0.20:
             score += 4
+            notes.append("ROE >20%: +4")
 
-    if yld is not None and yld > 0.07:
-        score -= 10
+    # Yield penalty: very high yield is often risk.
+    # Sector-aware: Real Estate can have higher yields without being automatically risky.
+    if yld is not None:
+        yld_hi = 0.07 if sk != "real estate" else 0.09
+        if yld > yld_hi:
+            score -= 10
+            notes.append(f"Dividend yield >{yld_hi*100:.0f}%: -10 (potential risk)")
 
-    return round(clamp(score, 0.0, 100.0), 2)
+    score = round(clamp(score, 0.0, 100.0), 2)
+    notes_str = "; ".join(notes) if notes else ""
+    return score, notes_str
 
 
 def dividend_growth_score(row):
@@ -334,7 +456,17 @@ def dividend_growth_score(row):
     return round(clamp(score, 0.0, 100.0), 2)
 
 
-def yield_trap_flag(row):
+def yield_trap_flag_with_reason(row):
+    """
+    Returns: (bool, reason)
+    Sector-aware yield thresholds:
+      - Real Estate: allow higher base yields before calling "trap"
+      - Utilities: slightly higher base yields acceptable
+      - Others: default threshold
+    """
+    sector = row.get("sector")
+    sk = _sector_key(sector)
+
     yld = row.get("dividend_yield")
     payout_fcf = row.get("payout_fcf")
     payout_eps = row.get("payout_eps")
@@ -342,60 +474,96 @@ def yield_trap_flag(row):
     div_cuts_10y = row.get("div_cuts_10y")
 
     if yld is None:
-        return False
+        return False, ""
 
-    if yld > 0.06:
-        if (payout_fcf is not None and payout_fcf > 1.0) or (payout_eps is not None and payout_eps > 0.95):
-            return True
+    base_thr = 0.06
+    if sk == "real estate":
+        base_thr = 0.08
+    elif sk == "utilities":
+        base_thr = 0.07
+
+    if yld > base_thr:
+        if (payout_fcf is not None and payout_fcf > 1.0):
+            return True, f"Yield>{base_thr*100:.0f}% and payout_fcf>1.0"
+        if (payout_eps is not None and payout_eps > 0.95) and sk != "real estate":
+            return True, f"Yield>{base_thr*100:.0f}% and payout_eps>0.95"
         if fcf_total is not None and fcf_total <= 0:
-            return True
+            return True, f"Yield>{base_thr*100:.0f}% and FCF<=0"
         if div_cuts_10y is not None and div_cuts_10y >= 1:
-            return True
-    return False
+            return True, f"Yield>{base_thr*100:.0f}% and dividend cuts in 10y"
+    return False, ""
 
 
-def valuation_score_0_5(row):
+def valuation_score_0_5_with_notes(row):
+    """
+    Returns: (score_0_5, notes_str)
+    Adds FCF yield sanity check when available.
+    """
     score = 2.5
+    notes = []
 
     pe = row.get("trailing_pe")
     ev_ebitda = row.get("ev_ebitda")
     price_vs_ma200 = row.get("price_vs_ma200")
     yld = row.get("dividend_yield")
     yld5 = row.get("yield_avg_5y")
+    fcf_yield = row.get("fcf_yield")  # FCF / market cap
 
     if pe is not None:
         if pe <= 15:
             score += 0.8
+            notes.append("PE<=15: +0.8")
         elif pe <= 22:
             score += 0.4
+            notes.append("PE<=22: +0.4")
         elif pe >= 35:
             score -= 0.8
+            notes.append("PE>=35: -0.8")
         elif pe >= 28:
             score -= 0.4
+            notes.append("PE>=28: -0.4")
 
     if ev_ebitda is not None:
         if ev_ebitda <= 10:
             score += 0.8
+            notes.append("EV/EBITDA<=10: +0.8")
         elif ev_ebitda <= 14:
             score += 0.4
+            notes.append("EV/EBITDA<=14: +0.4")
         elif ev_ebitda >= 22:
             score -= 0.8
+            notes.append("EV/EBITDA>=22: -0.8")
         elif ev_ebitda >= 18:
             score -= 0.4
+            notes.append("EV/EBITDA>=18: -0.4")
 
     if price_vs_ma200 is not None:
         if price_vs_ma200 <= -0.10:
             score += 0.4
+            notes.append("Price <= -10% vs MA200: +0.4")
         elif price_vs_ma200 >= 0.15:
             score -= 0.4
+            notes.append("Price >= +15% vs MA200: -0.4")
 
     if yld is not None and yld5 is not None:
         if yld >= yld5 * 1.15:
             score += 0.4
+            notes.append("Yield >= 1.15x 5y avg: +0.4")
         elif yld <= yld5 * 0.85:
             score -= 0.2
+            notes.append("Yield <= 0.85x 5y avg: -0.2")
 
-    return round(max(0.0, min(5.0, score)), 2)
+    if fcf_yield is not None:
+        if fcf_yield >= 0.06:
+            score += 0.3
+            notes.append("FCF yield >=6%: +0.3")
+        elif fcf_yield <= 0.03:
+            score -= 0.3
+            notes.append("FCF yield <=3%: -0.3")
+
+    score = round(max(0.0, min(5.0, score)), 2)
+    notes_str = "; ".join(notes) if notes else ""
+    return score, notes_str
 
 
 def valuation_verdict(score_0_5):
@@ -422,22 +590,97 @@ def safety_verdict(safety_0_100):
     return "FAIL"
 
 
+def data_coverage_pct(row):
+    """
+    Measures how much of the *key* data used by the model is present.
+    """
+    keys = [
+        "dividend_yield",
+        "payout_fcf",
+        "payout_eps",
+        "free_cashflow_num",
+        "net_debt_to_ebitda",
+        "interest_coverage",
+        "div_cuts_10y",
+        "trailing_pe",
+        "ev_ebitda",
+        "price_vs_ma200",
+        "yield_avg_5y",
+        "div_cagr_5y",
+        "div_cagr_10y",
+        "fcf_yield",
+    ]
+    present = 0
+    total = len(keys)
+    for k in keys:
+        v = row.get(k)
+        if v is None:
+            continue
+        try:
+            if isinstance(v, float) and np.isnan(v):
+                continue
+        except Exception:
+            pass
+        present += 1
+    return round((present / total) * 100.0, 2) if total else None
+
+
+def final_score_0_100(row):
+    """
+    Weighted score:
+      safety 55%
+      valuation 25% (mapped from 0-5 to 0-100)
+      dividend growth 20%
+    Missing metrics are re-weighted automatically.
+    """
+    safety = row.get("dividend_safety_score")
+    val = row.get("valuation_score_0_5")
+    growth = row.get("dividend_growth_score")
+
+    val_0_100 = None if val is None else float(val) * 20.0
+
+    parts = norm_weights([
+        (safety, 0.55),
+        (val_0_100, 0.25),
+        (growth, 0.20),
+    ])
+    if not parts:
+        return None
+    s = 0.0
+    for v, w in parts:
+        s += float(v) * float(w)
+    return round(clamp(s, 0.0, 100.0), 2)
+
+
 def final_recommendation(row):
+    """
+    Returns: (final_recommendation, final_reason)
+    """
     safety = row.get("dividend_safety_score")
     val = row.get("valuation_score_0_5")
     trap = row.get("yield_trap_flag")
+    trap_reason = row.get("yield_trap_reason") or ""
+    cov = row.get("data_coverage_pct")
     c5 = row.get("div_cagr_5y")
     c10 = row.get("div_cagr_10y")
     growth_best = c10 if c10 is not None else c5
 
     if trap:
-        return "AVOID", "Yield trap: high yield + weak coverage/cuts"
+        return "AVOID", f"Yield trap: {trap_reason}".strip()
 
-    if safety is None or val is None:
-        return "WATCH", "Insufficient data for full verdict"
+    if cov is not None and cov < 55:
+        return "WATCH", f"Low data coverage ({cov:.0f}%)"
+
+    if safety is None:
+        return "WATCH", "Missing safety inputs"
 
     if safety < 70:
         return "WATCH", "Safety below PASS threshold"
+
+    if val is None:
+        if safety >= 85 and (growth_best is None or growth_best >= 0.03):
+            return "BUY", "High safety, valuation missing (needs manual check)"
+        return "HOLD", "Safety pass, valuation missing"
 
     if safety >= 80 and val >= 3.5:
         if growth_best is None or growth_best >= 0.03:
@@ -467,6 +710,10 @@ def build_kpi_dictionary_rows():
         ("ath_price", "All-time-high price (formatted)", "Max adjusted close from yfinance period='max', formatted as K/M/B/T."),
         ("ath_date", "Date when ATH was reached", "First date where adjusted close equals the max (YYYY-MM-DD)."),
         ("ath_days_since", "Days since ATH", "Today(UTC) - ath_date, in days."),
+        ("data_coverage_pct", "Data coverage confidence %", "Percent of key inputs present (safety + valuation + growth)."),
+        ("final_score_0_100", "Final composite score (0-100)", "Weighted: safety 55%, valuation 25% (0-5 -> 0-100), growth 20%, with re-weighting when missing."),
+        ("safety_notes", "Why safety score moved", "Explains penalties/bonuses applied in dividend_safety_score."),
+        ("valuation_notes", "Why valuation score moved", "Explains penalties/bonuses applied in valuation_score."),
     ]
     out = [["kpi", "meaning", "how_calculated_or_source"]]
     out.extend([list(r) for r in rows])
@@ -580,46 +827,51 @@ def get_snapshot(ticker_items):
         except Exception:
             pass
 
-        # Dividend history
+        # Price series (reuse)
+        close_series_5y = None
+        try:
+            if len(yf_tickers) == 1:
+                close_series_5y = px_5y["Close"].dropna()
+            else:
+                close_series_5y = px_5y[t]["Close"].dropna()
+        except Exception:
+            close_series_5y = None
+
+        # Dividend series (reuse) + annual aggregates
+        divs_series = None
+        annual_div = None
         div_cuts_10y = None
         div_cagr_5y = None
         div_cagr_10y = None
+        div_streak_years = None
         try:
-            divs = tk.dividends
-            if divs is not None and len(divs) > 0:
-                annual = annual_dividends_series(divs)
-                div_cuts_10y = count_div_cuts_10y(annual)
-                div_cagr_5y = dividend_cagr_n_years(annual, 5)
-                div_cagr_10y = dividend_cagr_n_years(annual, 10)
+            divs_series = tk.dividends
+            if divs_series is not None and len(divs_series) > 0:
+                annual_div = annual_dividends_series(divs_series)
+                div_cuts_10y = count_div_cuts_10y(annual_div)
+                div_cagr_5y = dividend_cagr_n_years(annual_div, 5)
+                div_cagr_10y = dividend_cagr_n_years(annual_div, 10)
+                div_streak_years = dividend_streak_years(annual_div)
         except Exception:
-            pass
+            divs_series = None
+            annual_div = None
 
         # MA200
         ma200 = None
         price_vs_ma200 = None
         try:
-            if len(yf_tickers) == 1:
-                close_series = px_5y["Close"].dropna()
-            else:
-                close_series = px_5y[t]["Close"].dropna()
-            if len(close_series) >= 200:
-                ma200 = float(close_series.tail(200).mean())
+            if close_series_5y is not None and len(close_series_5y) >= 200:
+                ma200 = float(close_series_5y.tail(200).mean())
                 if last_close is not None and ma200 not in (None, 0, 0.0):
                     price_vs_ma200 = (last_close / ma200) - 1.0
         except Exception:
             pass
 
-        # Yield Avg 5Y
+        # Yield Avg 5Y (reuse annual_div + close_series_5y)
         yield_avg_5y = None
         try:
-            divs = tk.dividends
-            if divs is not None and len(divs) > 0:
-                annual_div = annual_dividends_series(divs)
-                if len(yf_tickers) == 1:
-                    close = px_5y["Close"].dropna()
-                else:
-                    close = px_5y[t]["Close"].dropna()
-                annual_price = close.resample("Y").mean()
+            if annual_div is not None and close_series_5y is not None and len(close_series_5y) > 0:
+                annual_price = close_series_5y.resample("Y").mean()
                 joined = pd.concat([annual_div, annual_price], axis=1).dropna()
                 if joined.shape[0] > 0:
                     joined = joined.tail(5)
@@ -659,32 +911,38 @@ def get_snapshot(ticker_items):
 
         google_ticker = yf_to_google.get(t, t)
 
+        currency_yf = info.get("currency")
+        currency_by_exchange = currency_from_google_ticker(google_ticker)
+        final_currency = currency_by_exchange or currency_yf
+
+        fcf_yield = safe_div(fcf_total_num, market_cap_num)
+
         rows.append({
             "as_of_date": as_of_date,
             "ticker": t,
             "google_ticker": google_ticker,
             "name": info.get("shortName") or info.get("longName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
             "price": last_close,
-            "currency": info.get("currency"),
+            "currency": final_currency,
+            "currency_yf": currency_yf,
+            "currency_by_exchange": currency_by_exchange,
 
-            # Formula
             "sparkline_1y": "",
 
-            # ATH / Dip
             "ath_price": compact_number(ath_price_num),
             "ath_date": ath_date,
             "ath_days_since": ath_days_since,
             "percentage_vs_ath_pct": percentage_vs_ath_pct,
             "buy_the_dip_20_ath": buy_the_dip_20_ath,
 
-            # Dividend basics
             "dividend_yield": yld,
             "dividend_yield_pct": (yld * 100.0) if yld is not None else None,
             "div_per_share_ttm": dps_ttm,
             "dividend_rate_fwd": to_num(info.get("dividendRate")),
             "ex_dividend_date": ex_dividend_date,
 
-            # Safety
             "fcf_per_share_ttm": fcf_per_share,
             "payout_fcf": payout_fcf,
             "eps_ttm": trailing_eps,
@@ -692,10 +950,10 @@ def get_snapshot(ticker_items):
             "net_debt_to_ebitda": net_debt_to_ebitda,
             "interest_coverage": interest_coverage,
             "div_cuts_10y": div_cuts_10y,
+            "div_streak_years": div_streak_years,
             "div_cagr_5y": div_cagr_5y,
             "div_cagr_10y": div_cagr_10y,
 
-            # Valuation
             "trailing_pe": to_num(info.get("trailingPE")),
             "forward_pe": to_num(info.get("forwardPE")),
             "price_to_book": to_num(info.get("priceToBook")),
@@ -703,17 +961,16 @@ def get_snapshot(ticker_items):
             "yield_avg_5y": yield_avg_5y,
             "ma200": ma200,
             "price_vs_ma200": price_vs_ma200,
+            "fcf_yield": fcf_yield,
+            "fcf_yield_pct": (fcf_yield * 100.0) if fcf_yield is not None else None,
 
-            # Big-number fundamentals (formatted-only output)
             "market_cap": compact_number(market_cap_num),
             "free_cashflow": compact_number(fcf_total_num),
             "total_debt": compact_number(total_debt_num),
             "total_cash": compact_number(total_cash_num),
 
-            # Internal numeric for scoring only (NOT output)
             "_free_cashflow_num": fcf_total_num,
 
-            # Other
             "debt_to_equity": to_num(info.get("debtToEquity")),
             "roe": to_num(info.get("returnOnEquity")),
             "profit_margin": to_num(info.get("profitMargins")),
@@ -722,21 +979,32 @@ def get_snapshot(ticker_items):
 
     df = pd.DataFrame(rows)
 
-    # Scores (use internal numeric FCF)
     def _row_for_scores(r):
         d = r.to_dict()
         d["free_cashflow_num"] = d.get("_free_cashflow_num")
         return d
 
-    df["dividend_safety_score"] = df.apply(lambda r: dividend_safety_score(_row_for_scores(r)), axis=1)
+    safety = df.apply(lambda r: dividend_safety_score_with_notes(_row_for_scores(r)), axis=1, result_type="expand")
+    df["dividend_safety_score"] = safety[0]
+    df["safety_notes"] = safety[1]
+
     df["dividend_growth_score"] = df.apply(lambda r: dividend_growth_score(_row_for_scores(r)), axis=1)
-    df["yield_trap_flag"] = df.apply(lambda r: yield_trap_flag(_row_for_scores(r)), axis=1)
+
+    trap = df.apply(lambda r: yield_trap_flag_with_reason(_row_for_scores(r)), axis=1, result_type="expand")
+    df["yield_trap_flag"] = trap[0]
+    df["yield_trap_reason"] = trap[1]
 
     df["safety_score_0_5"] = df["dividend_safety_score"].apply(map_0_100_to_0_5)
     df["safety_verdict"] = df["dividend_safety_score"].apply(safety_verdict)
 
-    df["valuation_score_0_5"] = df.apply(lambda r: valuation_score_0_5(_row_for_scores(r)), axis=1)
+    val = df.apply(lambda r: valuation_score_0_5_with_notes(_row_for_scores(r)), axis=1, result_type="expand")
+    df["valuation_score_0_5"] = val[0]
+    df["valuation_notes"] = val[1]
     df["valuation_verdict"] = df["valuation_score_0_5"].apply(valuation_verdict)
+
+    df["data_coverage_pct"] = df.apply(lambda r: data_coverage_pct(_row_for_scores(r)), axis=1)
+    df["final_score_0_100"] = df.apply(lambda r: final_score_0_100(r.to_dict()), axis=1)
+    df["final_score_0_5"] = df["final_score_0_100"].apply(map_0_100_to_0_5)
 
     final = df.apply(lambda r: final_recommendation(r.to_dict()), axis=1, result_type="expand")
     df["final_recommendation"] = final[0]
@@ -753,19 +1021,20 @@ def get_snapshot(ticker_items):
         ',"price",TODAY()-365,TODAY()))'
     )
 
-    # Remove internal-only columns
     df = df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore")
 
-    preferred_cols = [
-        "as_of_date","ticker","google_ticker","name","price","currency","sparkline_1y",
-        "ath_price","ath_date","ath_days_since","percentage_vs_ath_pct","buy_the_dip_20_ath",
-        "final_recommendation","final_reason",
-        "dividend_safety_score","safety_score_0_5","safety_verdict",
-        "valuation_score_0_5","valuation_verdict","dividend_growth_score","yield_trap_flag",
+        preferred_cols = [
+        "as_of_date","ticker","sector","google_ticker","name","industry","price","currency","currency_yf","currency_by_exchange","sparkline_1y",
+        "final_recommendation","final_reason","final_score_0_100","final_score_0_5","data_coverage_pct",
+        "dividend_safety_score","safety_score_0_5","safety_verdict","safety_notes",
+        "valuation_score_0_5","valuation_verdict","valuation_notes",
+        "dividend_growth_score","yield_trap_flag","yield_trap_reason",
         "dividend_yield_pct","dividend_yield","div_per_share_ttm","dividend_rate_fwd","ex_dividend_date",
-        "div_cagr_5y_pct","div_cagr_10y_pct",
+        "div_streak_years","div_cagr_5y_pct","div_cagr_10y_pct",
         "fcf_per_share_ttm","payout_fcf","eps_ttm","payout_eps","net_debt_to_ebitda","interest_coverage","div_cuts_10y",
         "trailing_pe","forward_pe","ev_ebitda","price_to_book","yield_avg_5y","ma200","price_vs_ma200",
+        "fcf_yield_pct","fcf_yield",
+        "ath_price","ath_date","ath_days_since","percentage_vs_ath_pct","buy_the_dip_20_ath",
         "market_cap","free_cashflow","total_debt","total_cash",
         "debt_to_equity","roe","profit_margin","beta",
     ]
@@ -853,6 +1122,8 @@ def add_gradient_conditional_formats_and_bold(sh, ws, header, n_rows):
     add_scale("dividend_safety_score", 40, 70, 95, red, yellow, green)
     add_scale("valuation_score_0_5", 1.5, 3.0, 4.5, red, yellow, green)
     add_scale("dividend_growth_score", 20, 55, 85, red, yellow, green)
+    add_scale("final_score_0_100", 40, 70, 90, red, yellow, green)
+    add_scale("data_coverage_pct", 40, 70, 95, red, yellow, green)
 
     # Lower is better
     add_scale("payout_fcf", 0.2, 0.65, 1.2, green, yellow, red)
@@ -863,7 +1134,7 @@ def add_gradient_conditional_formats_and_bold(sh, ws, header, n_rows):
     # % vs ATH: more negative is better dip
     add_scale("percentage_vs_ath_pct", -40, -20, 0, green, yellow, red)
 
-    # Bold entire rows where final_recommendation == STRONG BUY (FIXED formula)
+    # Bold entire rows where final_recommendation == STRONG BUY
     rec_col = col_index(header, "final_recommendation")
     if rec_col is not None:
         col_letter = col_to_a1(rec_col)
