@@ -1023,7 +1023,7 @@ def get_snapshot(ticker_items):
 
     df = df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore")
 
-        preferred_cols = [
+    preferred_cols = [
         "as_of_date","ticker","sector","google_ticker","name","industry","price","currency","currency_yf","currency_by_exchange","sparkline_1y",
         "final_recommendation","final_reason","final_score_0_100","final_score_0_5","data_coverage_pct",
         "dividend_safety_score","safety_score_0_5","safety_verdict","safety_notes",
