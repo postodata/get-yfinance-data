@@ -72,15 +72,15 @@ jobs:
             ZTS
             ETR:RHM
             EPA:DG
-            EPA:SNA
+            NYSE:SNY
             EPA:TTE
             EPA:PUB
-            AMS:UNA
+            NYSE:UL
             AMS:AD
             AMS:INGA
-            AMS:SHELL 
-            RIO 
-            TM 
+            AMS:SHELL
+            RIO
+            TM
             HSBC
             VZ
           SHEET_NAME: "Stocks_Dividends_Core_OS"

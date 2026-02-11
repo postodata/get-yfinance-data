@@ -706,17 +706,95 @@ def final_recommendation(row):
 # KPI Dictionary (separate sheet)
 # ----------------------------
 def build_kpi_dictionary_rows():
-    rows = [
-        ("ath_price", "All-time-high price (formatted)", "Max adjusted close from yfinance period='max', formatted as K/M/B/T."),
-        ("ath_date", "Date when ATH was reached", "First date where adjusted close equals the max (YYYY-MM-DD)."),
-        ("ath_days_since", "Days since ATH", "Today(UTC) - ath_date, in days."),
-        ("data_coverage_pct", "Data coverage confidence %", "Percent of key inputs present (safety + valuation + growth)."),
-        ("final_score_0_100", "Final composite score (0-100)", "Weighted: safety 55%, valuation 25% (0-5 -> 0-100), growth 20%, with re-weighting when missing."),
-        ("safety_notes", "Why safety score moved", "Explains penalties/bonuses applied in dividend_safety_score."),
-        ("valuation_notes", "Why valuation score moved", "Explains penalties/bonuses applied in valuation_score."),
+    """
+    KPI_Dictionary documents *every* column in Snapshot.
+    We keep curated explanations for key computed fields; everything else is sourced from yfinance or computed from price/dividend time series.
+    """
+    desc = {
+        "as_of_date": ("Snapshot date (UTC)", "datetime.now(timezone.utc).date().isoformat()"),
+        "ticker": ("Ticker used for yfinance", "Parsed from TICKERS env; for 'EXCH:SYM' it uses 'SYM' as yfinance ticker."),
+        "sector": ("Company sector", "yfinance tk.info['sector']"),
+        "google_ticker": ("Ticker for GOOGLEFINANCE in Sheets", "Input keeps exchange prefix if provided (e.g., 'EPA:TTE')."),
+        "name": ("Company name", "yfinance tk.info['shortName'] or ['longName']"),
+        "industry": ("Company industry", "yfinance tk.info['industry']"),
+        "price": ("Latest adjusted close (approx.)", "From yf.download(period=10d, auto_adjust=True) last close; fallback tk.info['regularMarketPrice']."),
+        "currency_by_exchange": ("Currency (exchange-aware)", "If google_ticker has prefix EPA/AMS/ETR => EUR, else fallback yfinance tk.info['currency']."),
+        "sparkline_1y": ("1Y price sparkline (Sheets formula)", "SPARKLINE(GOOGLEFINANCE(google_ticker, 'price', TODAY()-365, TODAY()))."),
+        "ath_price": ("All-time-high price (formatted)", "Max adjusted close from yfinance period='max', formatted as K/M/B/T."),
+        "ath_date": ("Date when ATH was reached", "First date where adjusted close equals the max (YYYY-MM-DD)."),
+        "ath_days_since": ("Days since ATH", "Today(UTC) - ath_date, in days."),
+        "percentage_vs_ath_pct": ("% vs ATH", "(price/ath_price - 1) * 100."),
+        "buy_the_dip_20_ath": ("Simple dip flag", "BUY NOW if price <= 80% of ATH else WAIT."),
+        "dividend_yield": ("Trailing dividend yield (decimal)", "yfinance tk.info['dividendYield']"),
+        "dividend_yield_pct": ("Trailing dividend yield (%)", "dividend_yield * 100."),
+        "div_per_share_ttm": ("Trailing annual dividend per share", "yfinance tk.info['trailingAnnualDividendRate']"),
+        "dividend_rate_fwd": ("Forward annual dividend per share", "yfinance tk.info['dividendRate']"),
+        "ex_dividend_date": ("Ex-dividend date", "yfinance tk.info['exDividendDate'] converted to YYYY-MM-DD."),
+        "fcf_per_share_ttm": ("Free cash flow per share (TTM approx.)", "freeCashflow / sharesOutstanding (from yfinance tk.info)."),
+        "payout_fcf": ("Dividend payout ratio on FCF", "(trailingAnnualDividendRate * sharesOutstanding) / freeCashflow."),
+        "eps_ttm": ("Trailing EPS", "yfinance tk.info['trailingEps']"),
+        "payout_eps": ("Dividend payout ratio on EPS", "yfinance tk.info['payoutRatio']"),
+        "net_debt_to_ebitda": ("Net debt / EBITDA", "(totalDebt - totalCash) / ebitda (from yfinance tk.info)."),
+        "interest_coverage": ("Interest coverage (approx.)", "From tk.financials: EBIT / |Interest Expense| when available."),
+        "div_cuts_10y": ("Dividend cuts in last 10y", "Count of annual dividend decreases vs prior year over last 10y."),
+        "div_streak_years": ("No-cut streak (years)", "Consecutive years (backwards) with annual dividends non-decreasing."),
+        "div_cagr_5y_pct": ("Dividend CAGR 5y (%)", "CAGR of annual dividends between (end-5y) and end year."),
+        "div_cagr_10y_pct": ("Dividend CAGR 10y (%)", "CAGR of annual dividends between (end-10y) and end year."),
+        "trailing_pe": ("Trailing P/E", "yfinance tk.info['trailingPE']"),
+        "forward_pe": ("Forward P/E", "yfinance tk.info['forwardPE']"),
+        "price_to_book": ("Price-to-book", "yfinance tk.info['priceToBook']"),
+        "ev_ebitda": ("Enterprise value / EBITDA", "yfinance tk.info['enterpriseToEbitda']"),
+        "yield_avg_5y": ("Average yield (5y, approx.)", "Mean of (annual dividends / annual average price) over last 5 years."),
+        "ma200": ("200-day moving average", "Mean of last 200 closes from 5y daily series (auto-adjusted)."),
+        "price_vs_ma200": ("Price vs MA200 (decimal)", "(price/ma200) - 1."),
+        "fcf_yield": ("FCF yield (decimal)", "freeCashflow / marketCap (from yfinance tk.info)."),
+        "fcf_yield_pct": ("FCF yield (%)", "fcf_yield * 100."),
+        "market_cap": ("Market cap (formatted)", "yfinance tk.info['marketCap'] formatted as K/M/B/T."),
+        "free_cashflow": ("Free cash flow (formatted)", "yfinance tk.info['freeCashflow'] formatted as K/M/B/T."),
+        "total_debt": ("Total debt (formatted)", "yfinance tk.info['totalDebt'] formatted as K/M/B/T."),
+        "total_cash": ("Total cash (formatted)", "yfinance tk.info['totalCash'] formatted as K/M/B/T."),
+        "debt_to_equity": ("Debt-to-equity", "yfinance tk.info['debtToEquity']"),
+        "roe": ("Return on equity", "yfinance tk.info['returnOnEquity']"),
+        "profit_margin": ("Profit margin", "yfinance tk.info['profitMargins']"),
+        "beta": ("Beta", "yfinance tk.info['beta']"),
+
+        "dividend_safety_score": ("Dividend safety score (0-100)", "Rule-based scoring using payout ratios, FCF, leverage, interest coverage, dividend cuts; sector-aware adjustments for REITs/Financials."),
+        "safety_score_0_5": ("Safety score mapped to 0-5", "(dividend_safety_score/100)*5."),
+        "safety_verdict": ("Safety verdict", "PASS/PASS(Strong)/BORDERLINE/FAIL based on safety score thresholds."),
+        "safety_notes": ("Safety score explanation", "Text notes describing penalties/bonuses applied."),
+        "valuation_score_0_5": ("Valuation score (0-5)", "Rule-based score using PE, EV/EBITDA, price vs MA200, yield vs 5y avg, and FCF yield."),
+        "valuation_verdict": ("Valuation verdict", "UNDERVALUED/FAIR/RICH/VERY RICH based on valuation_score_0_5."),
+        "valuation_notes": ("Valuation score explanation", "Text notes describing valuation adjustments."),
+        "dividend_growth_score": ("Dividend growth score (0-100)", "Rule-based score using dividend CAGR, ROE, payout_fcf, leverage."),
+        "yield_trap_flag": ("Yield trap flag", "True if yield is high and coverage/FCF/cut signals are weak (sector-aware thresholds)."),
+        "yield_trap_reason": ("Yield trap reason", "Explains which rule triggered the yield trap."),
+        "data_coverage_pct": ("Data coverage confidence %", "Percent of key model inputs present."),
+        "final_score_0_100": ("Final composite score (0-100)", "Weighted: safety 55%, valuation 25% (0-5->0-100), growth 20%, with re-weighting when missing."),
+        "final_score_0_5": ("Final score mapped to 0-5", "(final_score_0_100/100)*5."),
+        "final_recommendation": ("Final recommendation", "AVOID/WATCH/HOLD/BUY/STRONG BUY based on yield trap, coverage, safety, valuation, and growth."),
+        "final_reason": ("Final recommendation reason", "Short explanation of which rule produced the recommendation."),
+    }
+
+    snapshot_cols = [
+        "as_of_date","ticker","sector","google_ticker","name","industry","price","currency_by_exchange","sparkline_1y",
+        "final_recommendation","final_reason","final_score_0_100","final_score_0_5","data_coverage_pct",
+        "dividend_safety_score","safety_score_0_5","safety_verdict","safety_notes",
+        "valuation_score_0_5","valuation_verdict","valuation_notes",
+        "dividend_growth_score","yield_trap_flag","yield_trap_reason",
+        "dividend_yield_pct","dividend_yield","div_per_share_ttm","dividend_rate_fwd","ex_dividend_date",
+        "div_streak_years","div_cagr_5y_pct","div_cagr_10y_pct",
+        "fcf_per_share_ttm","payout_fcf","eps_ttm","payout_eps","net_debt_to_ebitda","interest_coverage","div_cuts_10y",
+        "trailing_pe","forward_pe","ev_ebitda","price_to_book","yield_avg_5y","ma200","price_vs_ma200",
+        "fcf_yield_pct","fcf_yield",
+        "ath_price","ath_date","ath_days_since","percentage_vs_ath_pct","buy_the_dip_20_ath",
+        "market_cap","free_cashflow","total_debt","total_cash",
+        "debt_to_equity","roe","profit_margin","beta",
     ]
+
     out = [["kpi", "meaning", "how_calculated_or_source"]]
-    out.extend([list(r) for r in rows])
+    for c in snapshot_cols:
+        meaning, how = desc.get(c, (c, "Not documented yet (please add)."))
+        out.append([c, meaning, how])
     return out
 
 
@@ -925,8 +1003,6 @@ def get_snapshot(ticker_items):
             "sector": info.get("sector"),
             "industry": info.get("industry"),
             "price": last_close,
-            "currency": final_currency,
-            "currency_yf": currency_yf,
             "currency_by_exchange": currency_by_exchange,
 
             "sparkline_1y": "",
@@ -1024,7 +1100,7 @@ def get_snapshot(ticker_items):
     df = df.drop(columns=[c for c in df.columns if c.startswith("_")], errors="ignore")
 
     preferred_cols = [
-        "as_of_date","ticker","sector","google_ticker","name","industry","price","currency","currency_yf","currency_by_exchange","sparkline_1y",
+        "as_of_date","ticker","sector","google_ticker","name","industry","price","currency_by_exchange","sparkline_1y",
         "final_recommendation","final_reason","final_score_0_100","final_score_0_5","data_coverage_pct",
         "dividend_safety_score","safety_score_0_5","safety_verdict","safety_notes",
         "valuation_score_0_5","valuation_verdict","valuation_notes",
