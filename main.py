@@ -718,7 +718,7 @@ def build_kpi_dictionary_rows():
         "name": ("Company name", "yfinance tk.info['shortName'] or ['longName']"),
         "industry": ("Company industry", "yfinance tk.info['industry']"),
         "price": ("Latest adjusted close (approx.)", "From yf.download(period=10d, auto_adjust=True) last close; fallback tk.info['regularMarketPrice']."),
-        "currency_by_exchange": ("Currency (exchange-aware)", "If google_ticker has prefix EPA/AMS/ETR => EUR, else fallback yfinance tk.info['currency']."),
+        "currency_by_exchange": ("Currency (exchange-aware)", "If google_ticker has prefix EPA/AMS/ETR => EUR, else fallback yfinance tk.info['currency']; if still missing => USD."),
         "sparkline_1y": ("1Y price sparkline (Sheets formula)", "SPARKLINE(GOOGLEFINANCE(google_ticker, 'price', TODAY()-365, TODAY()))."),
         "ath_price": ("All-time-high price (formatted)", "Max adjusted close from yfinance period='max', formatted as K/M/B/T."),
         "ath_date": ("Date when ATH was reached", "First date where adjusted close equals the max (YYYY-MM-DD)."),
@@ -1294,6 +1294,20 @@ def append_history(ws, df, key_cols=("as_of_date", "ticker")):
         ws.append_rows(new_rows, value_input_option="USER_ENTERED")
 
 
+def upsert_formula_sheet(sh, tab_name: str, formula_a1: str, rows: int = 2000, cols: int = 20):
+    """
+    Ensures a worksheet exists, clears it, writes formula into A1 (USER_ENTERED), and freezes first row/col.
+    """
+    try:
+        ws = sh.worksheet(tab_name)
+    except Exception:
+        ws = sh.add_worksheet(title=tab_name, rows=rows, cols=cols)
+
+    ws.clear()
+    ws.update([[formula_a1]], value_input_option="USER_ENTERED")
+    freeze_panes(ws, rows=1, cols=1)
+    return ws
+
 def upsert_kpi_dictionary(sh, tab_name="KPI_Dictionary"):
     try:
         ws = sh.worksheet(tab_name)
@@ -1347,6 +1361,31 @@ def main():
     freeze_panes(ws_hist, rows=1, cols=2)
 
     upsert_kpi_dictionary(sh, tab_name=dictionary_tab)
+
+    # Derived views
+    # 1) Dividend_Yields_Passed: all PASS* rows, ordered by dividend yield (decimal) DESC.
+    # Snapshot column letters (A: as_of_date, B: ticker, Q: safety_verdict, Z: dividend_yield)
+    dividend_yields_passed_formula = '=QUERY(Snapshot!A1:Z1000,"SELECT A,B,Z WHERE Q LIKE \'PASS%\' ORDER BY Z DESC",1)'
+    upsert_formula_sheet(sh, tab_name="Dividend_Yields_Passed", formula_a1=dividend_yields_passed_formula, rows=2000, cols=10)
+
+    # 2) Buying_Recommendations_Now: what you can buy with $300 based on Snapshot scores.
+    # Filters: safety_verdict PASS* AND final_recommendation in {BUY, STRONG BUY} AND price <= budget.
+    buying_recos_formula = (
+        '=LET('
+        'budget,300,'
+        'data,FILTER({Snapshot!B2:B,Snapshot!E2:E,Snapshot!G2:G,Snapshot!L2:L,Snapshot!J2:J,Snapshot!Y2:Y},'
+        'REGEXMATCH(Snapshot!Q2:Q,"^PASS"),'
+        'REGEXMATCH(Snapshot!J2:J,"^(STRONG BUY|BUY)$"),'
+        'Snapshot!G2:G<=budget),'
+        'sorted,SORT(data,4,FALSE),'
+        'top,INDEX(sorted,SEQUENCE(MIN(10,ROWS(sorted))),),'
+        'shares,FLOOR(budget/INDEX(top,,3),1),'
+        'cost,shares*INDEX(top,,3),'
+        '{"ticker","name","price","final_score","recommendation","div_yield_%","shares_with_$300","est_cost";'
+        'INDEX(top,,1),INDEX(top,,2),INDEX(top,,3),INDEX(top,,4),INDEX(top,,5),INDEX(top,,6),shares,cost}'
+        ')'
+    )
+    upsert_formula_sheet(sh, tab_name="Buying_Recommendations_Now", formula_a1=buying_recos_formula, rows=2000, cols=20)
 
     print("OK: Snapshot + History updated; freezes applied; gradients applied; STRONG BUY rows bolded; KPI_Dictionary updated.")
 

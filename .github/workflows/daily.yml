@@ -26,7 +26,6 @@ jobs:
             ALLY
             AMD
             AMT
-            ARE
             AVGO
             BABA
             BASFY
@@ -83,6 +82,7 @@ jobs:
             TM
             HSBC
             VZ
+            META
           SHEET_NAME: "Stocks_Dividends_Core_OS"
           SNAPSHOT_TAB: "Snapshot"
           HISTORY_TAB: "History"
