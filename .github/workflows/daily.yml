@@ -26,6 +26,7 @@ jobs:
             ALLY
             AMD
             AMT
+            AMZN
             AVGO
             BABA
             BASFY
@@ -34,14 +35,17 @@ jobs:
             BTI
             CUBE
             CVX
+            FLUT
             GOOG
             GRMN
             HPQ
+            HSBC
             INTC
             JNJ
             KHC
             LHX
             LMT
+            META
             MDLZ
             MMM
             MO
@@ -49,16 +53,24 @@ jobs:
             MSFT
             NEE
             NVO
+            NVDA
             O
             OHI
             ORCL
             PEP
+            PBR
             PFE
             PG
+            PLTR
             PM
+            RIO
+            RTX
             SAP
             SNOW
+            SNY
+            T
             TGT
+            TM
             TROW
             TSM
             TXN
@@ -67,22 +79,17 @@ jobs:
             UPS
             V
             VICI
+            VZ
             XOM
             ZTS
             ETR:RHM
             EPA:DG
-            NYSE:SNY
             EPA:TTE
             EPA:PUB
-            NYSE:UL
             AMS:AD
             AMS:INGA
             AMS:SHELL
-            RIO
-            TM
-            HSBC
-            VZ
-            META
+            
           SHEET_NAME: "Stocks_Dividends_Core_OS"
           SNAPSHOT_TAB: "Snapshot"
           HISTORY_TAB: "History"
